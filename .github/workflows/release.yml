@@ -43,8 +43,10 @@ jobs:
             10.x
 
       - name: Verify the tag matches <Version>
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          tag="${{ inputs.tag || github.ref_name }}"
+          tag="$RELEASE_TAG"
           version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -1)
           if [ "v$version" != "$tag" ]; then
             echo "::error::Tag '$tag' does not match <Version>$version</Version> in Directory.Build.props."
@@ -113,4 +115,5 @@ jobs:
         if: ${{ inputs.tag != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --draft=false
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
