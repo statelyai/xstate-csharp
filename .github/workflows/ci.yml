@@ -28,8 +28,8 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
-          # The libraries multi-target net8.0;net10.0, but the 10.x SDK builds both and the
-          # test projects are net10.0-only, so no 8.x runtime is needed.
+          # Libraries and tests multi-target net8.0;net10.0: the 10.x SDK builds both,
+          # and the 8.x runtime is needed to run the net8.0 test assemblies.
           dotnet-version: |
             8.x
             10.x
