@@ -2,7 +2,14 @@ name: Release Please
 
 # On every push to main, Release Please reads conventional commits (feat:, fix:, feat!: ...)
 # and keeps a release PR open that bumps <Version> in Directory.Build.props and CHANGELOG.md.
-# Merging that PR creates the GitHub release + `v<Version>` tag and publishes to NuGet.
+# Merging that PR creates a *draft* GitHub release; release.yml then builds, tests, runs the
+# W3C gate, publishes to NuGet, and only then publishes the release (which creates the tag).
+# So a failed publish never leaves a public release or tag behind.
+#
+# Optional: set a RELEASE_PLEASE_TOKEN secret (fine-grained PAT, contents + pull-requests
+# write) so the release PR is opened as a user and CI runs on it. With the default
+# GITHUB_TOKEN, PRs opened by Actions do not trigger pull_request workflows; release.yml
+# re-runs the full suite before publishing, so this is a convenience, not a gate.
 on:
   push:
     branches: [main]
@@ -17,9 +24,12 @@ jobs:
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag_name: ${{ steps.rp.outputs.tag_name }}
+      sha: ${{ steps.rp.outputs.sha }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: rp
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
   # A tag created with GITHUB_TOKEN does not fire `on: push: tags`, so call the release
   # workflow directly instead of relying on the tag trigger.
@@ -29,4 +39,5 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       tag: ${{ needs.release-please.outputs.tag_name }}
+      sha: ${{ needs.release-please.outputs.sha }}
     secrets: inherit

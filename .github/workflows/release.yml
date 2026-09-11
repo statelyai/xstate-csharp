@@ -1,7 +1,7 @@
 name: Release
 
 permissions:
-  contents: read
+  contents: write # publish the draft GitHub release after NuGet push
   id-token: write # NuGet Trusted Publishing (OIDC)
 
 # Normally invoked by release-please.yml after a release PR is merged. Pushing a
@@ -13,6 +13,10 @@ on:
     inputs:
       tag:
         description: Release tag, e.g. v0.1.0-alpha
+        required: true
+        type: string
+      sha:
+        description: Commit to release. The draft release's tag does not exist yet.
         required: true
         type: string
 
@@ -28,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ inputs.sha || github.ref_name }}
           fetch-depth: 0
 
       - name: Set up .NET
@@ -102,3 +106,11 @@ jobs:
             --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
+
+      # Called from release-please.yml: the release is still a draft (no tag yet). Publishing it
+      # creates the tag, so a failed build/test/push above leaves nothing public behind.
+      - name: Publish GitHub release
+        if: ${{ inputs.tag != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --draft=false
