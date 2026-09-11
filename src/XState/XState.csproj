@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <PackageId>XState</PackageId>
+    <Description>State machines and statecharts for .NET — a port of XState. Pure transition core with a host-neutral durable effect contract; SCXML-aligned semantics.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The SCXML layer reads State<T>.Machine to step a snapshot against the machine it came from. -->
+    <InternalsVisibleTo Include="XState.Scxml" />
+    <!-- Snapshot bookkeeping (generated-id counters, children ledger) is internal, but its
+         restore behaviour has to be testable against hand-constructed snapshots. -->
+    <InternalsVisibleTo Include="XState.Tests" />
+  </ItemGroup>
+</Project>

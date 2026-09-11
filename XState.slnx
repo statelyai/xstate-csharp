@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/XState.Scxml/XState.Scxml.csproj" />
+    <Project Path="src/XState/XState.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/DurableHost/DurableHost.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/XState.Scxml.Tests/XState.Scxml.Tests.csproj" />
+    <Project Path="tests/XState.TestKit/XState.TestKit.csproj" />
+    <Project Path="tests/XState.Tests/XState.Tests.csproj" />
+  </Folder>
+</Solution>

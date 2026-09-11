@@ -1,0 +1,50 @@
+<Project>
+
+  <!-- Compiler / language -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- XML docs ship in the packages. Incomplete docs are not a build break under
+         TreatWarningsAsErrors: CS1591 = undocumented public member,
+         CS1573 = only some parameters carry a <param> tag. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+  </PropertyGroup>
+
+  <!-- Package metadata (shared by both shipping libraries; test projects set IsPackable=false) -->
+  <PropertyGroup>
+    <!-- Release version. Bump HERE, then tag the commit `v<Version>` to trigger
+         .github/workflows/release.yml, which packs and pushes to NuGet. -->
+    <Version>0.1.0-alpha</Version>
+    <Authors>Stately</Authors>
+    <Company>Stately</Company>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>statechart;state-machine;xstate;scxml;fsm</PackageTags>
+    <PackageProjectUrl>https://github.com/statelyai/xstate-dotnet</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/statelyai/xstate-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <!-- Reproducible builds + debugging -->
+  <PropertyGroup>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Packed at the package root so nuget.org renders it; a no-op for IsPackable=false projects. -->
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="/" Visible="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
+
+</Project>

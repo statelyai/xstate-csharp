@@ -1,0 +1,92 @@
+name: Release
+
+permissions:
+  contents: read
+
+# Tag the release commit `v<Version>` (Version lives in Directory.Build.props).
+on:
+  push:
+    tags: ['v*']
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  publish:
+    name: Pack and publish to NuGet
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.x
+            10.x
+
+      - name: Verify the tag matches <Version>
+        run: |
+          version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' does not match <Version>$version</Version> in Directory.Build.props."
+            exit 1
+          fi
+
+      - name: Build
+        run: dotnet build XState.slnx -c Release
+
+      - name: Test
+        run: dotnet test XState.slnx -c Release --no-build
+
+      - name: W3C SCXML conformance gate
+        run: |
+          set -o pipefail
+          dotnet test XState.slnx -c Release --no-build \
+            --filter "FullyQualifiedName~W3cConformanceTests" \
+            | tee conformance.log
+
+          if ! grep -qE '^Passed!' conformance.log; then
+            echo "::error::W3C conformance suite did not report a passing run."
+            exit 1
+          fi
+          if ! grep -qE 'Failed:[[:space:]]+0,' conformance.log; then
+            echo "::error::W3C conformance suite has failing tests."
+            exit 1
+          fi
+          if ! grep -qE 'Skipped:[[:space:]]+0,' conformance.log; then
+            echo "::error::W3C conformance suite has skipped tests; the gate requires a fully green run."
+            exit 1
+          fi
+          grep -E 'Passed!|Total:' conformance.log
+
+      - name: Pack
+        run: dotnet pack XState.slnx -c Release --no-build -o artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+          if-no-files-found: error
+
+      # No NUGET_API_KEY secret => nothing is published; the packed artifacts above still
+      # upload, so a tag on a fork or before the secret exists is a harmless dry run.
+      # (The `secrets` context is not available in a step-level `if`, hence the env check.)
+      - name: Push to NuGet
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::notice::NUGET_API_KEY is not configured; skipping publish."
+            exit 0
+          fi
+          dotnet nuget push "artifacts/*.nupkg" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

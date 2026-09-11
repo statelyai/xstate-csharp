@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <PackageId>XState.Scxml</PackageId>
+    <Description>SCXML import/export and ECMAScript datamodel (via Jint) for XState for .NET. Pure transition core with a host-neutral durable effect contract; SCXML-aligned semantics.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../XState/XState.csproj" />
+    <PackageReference Include="Jint" Version="4.2.2" />
+  </ItemGroup>
+</Project>

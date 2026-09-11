@@ -1,0 +1,14 @@
+bin/
+obj/
+*.user
+.vs/
+.idea/
+artifacts/
+TestResults/
+
+# Agent tooling / worktrees
+.claude/
+.codex/
+.aider*
+.cursor/
+AGENTS.local.md

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/XState.Scxml/XState.Scxml.csproj" />
+    <ProjectReference Include="../XState.TestKit/XState.TestKit.csproj" />
+    <Content Include="w3c/**/*.scxml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- <data src>/<invoke src> auxiliary payloads referenced by the corpus. -->
+    <Content Include="w3c/**/*.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

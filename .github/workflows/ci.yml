@@ -1,0 +1,78 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  build:
+    name: Build, test, pack
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # SourceLink + EmbedUntrackedSources want the real commit, not a synthetic merge.
+          fetch-depth: 0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # The libraries multi-target net8.0;net10.0, but the 10.x SDK builds both and the
+          # test projects are net10.0-only, so no 8.x runtime is needed.
+          dotnet-version: |
+            8.x
+            10.x
+
+      - name: Restore
+        run: dotnet restore XState.slnx
+
+      - name: Build
+        run: dotnet build XState.slnx -c Release --no-restore
+
+      - name: Test
+        run: dotnet test XState.slnx -c Release --no-build
+
+      # The W3C SCXML conformance suite is a release gate: every vendored test must pass,
+      # and none may be skipped (a skip would silently drop coverage).
+      - name: W3C SCXML conformance gate
+        run: |
+          set -o pipefail
+          dotnet test XState.slnx -c Release --no-build \
+            --filter "FullyQualifiedName~W3cConformanceTests" \
+            | tee conformance.log
+
+          if ! grep -qE '^Passed!' conformance.log; then
+            echo "::error::W3C conformance suite did not report a passing run."
+            exit 1
+          fi
+          if ! grep -qE 'Failed:[[:space:]]+0,' conformance.log; then
+            echo "::error::W3C conformance suite has failing tests."
+            exit 1
+          fi
+          if ! grep -qE 'Skipped:[[:space:]]+0,' conformance.log; then
+            echo "::error::W3C conformance suite has skipped tests; the gate requires a fully green run."
+            exit 1
+          fi
+          grep -E 'Passed!|Total:' conformance.log
+
+      - name: Pack
+        run: dotnet pack XState.slnx -c Release --no-build -o artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+          if-no-files-found: error
