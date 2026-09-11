@@ -30,9 +30,6 @@ Transitions are a pure function with no side effects:
 ```csharp
 using XState;
 
-public record ToggleContext(int Count);
-public record Toggle : MachineEvent;
-
 var machine = Machine.Create<ToggleContext>("toggle")
     .Context(_ => new ToggleContext(Count: 0))
     .Initial("inactive")
@@ -48,6 +45,9 @@ var (state, effects) = machine.GetInitialState();
 var result = machine.Transition(state, new Toggle());
 
 result.State.Matches("active"); // true
+
+public record ToggleContext(int Count);
+public record Toggle : MachineEvent;
 ```
 
 `Transition` is synchronous and has no threading constraints. XState.NET ships no runtime. You
@@ -57,8 +57,8 @@ virtual clock.
 ## Effects
 
 Every side effect is an `Effect` record with the same `Kind` discriminant as XState v6. Each one
-projects onto a serializable `EffectDescriptor`: closures are dropped and actor references become
-addresses.
+projects onto a serializable `EffectDescriptor`: live logic and closures are dropped and actor
+references become addresses.
 
 | Effect | `Kind` | Meaning |
 |---|---|---|
@@ -69,7 +69,7 @@ addresses.
 | `TerminateEffect` | `@xstate.terminate` | Actor reached `Done` or `Error`; relay to the parent. |
 | `DeadLetterEffect` | `@xstate.deadLetter` | Event rejected at the boundary, never delivered. |
 | `EmitEffect` | `emit` | Emit an event to subscribers. |
-| `ActionEffect` | `action` | Run an action, by `(type, params)` if it has a portable identity. |
+| `ActionEffect` | `action` | Run an action by `(type, params)` if it has a portable identity. |
 
 Delays are logical timers. The machine records an id on its `Timers` ledger; your clock reports
 that the id elapsed by sending an `xstate.timer` event. The machine ignores ids it no longer holds,
@@ -77,7 +77,7 @@ so a cancel racing a firing is not a bug.
 
 ## Durable execution
 
-Pure transitions plus effects-as-data means the same machine runs unchanged on a durable host: a
+Pure transitions and data-only effects let the same machine run unchanged on a durable host: a
 workflow engine that owns persistence, retries, timers and messaging.
 
 `DurableExecution<TContext>` adds the identity a host needs: a stable id per effect
@@ -126,6 +126,7 @@ Aligned with SCXML and XState v6:
 XState JSON configs import directly, with named implementations supplied from C#:
 
 ```csharp
+using System.Text.Json;
 using XState.Json;
 
 var machine = MachineConfig.FromJson(json, new MachineImplementations<JsonElement>()
@@ -151,7 +152,7 @@ using XState.Scxml;
 var machine = ScxmlConverter.Parse(File.ReadAllText("traffic-light.scxml"));
 
 // Export: machine definition -> SCXML document
-string xml = ScxmlConverter.ToScxml(machine);
+XDocument xml = ScxmlConverter.ToScxml(machine);
 ```
 
 Export is strict by default. An action, guard or event descriptor that did not come from `Parse`
@@ -175,18 +176,19 @@ twice, as written and after a `Parse → ToScxml → Parse` round trip, and both
 ## Layout
 
 ```text
-src/XState/                 core: model, builder, transition algorithm, durable + persistence APIs
-src/XState.Scxml/           SCXML parser/serializer, Jint datamodel
-samples/DurableHost/        durable host: journal, timers, checkpoint, crash, resume
-docs/                       durable-hosts.md, persistence.md
-tests/XState.Tests/         core semantics tests (ported from xstate)
-tests/XState.Scxml.Tests/   W3C conformance harness
-tests/XState.TestKit/       deterministic interpreter (virtual clock) used by the tests
+src/XState/                core: model, builder, transition algorithm, durable + persistence APIs
+src/XState.Scxml/          SCXML parser/serializer, Jint datamodel
+samples/DurableHost/       durable host: journal, timers, checkpoint, crash, resume
+docs/                      durable-hosts.md, persistence.md
+tests/XState.Tests/        core semantics tests (ported from xstate)
+tests/XState.Scxml.Tests/  W3C conformance harness
+tests/XState.TestKit/      deterministic interpreter (virtual clock) used by the tests
 ```
 
 ## Build and test
 
-Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download) (pinned in `global.json`).
+Libraries and tests target `net8.0` and `net10.0`; the sample is `net10.0`-only. Building the
+solution requires the [.NET 10 SDK](https://dotnet.microsoft.com/download) (pinned in `global.json`).
 
 ```bash
 dotnet build XState.slnx
