@@ -15,8 +15,8 @@
 
   <!-- Package metadata (shared by both shipping libraries; test projects set IsPackable=false) -->
   <PropertyGroup>
-    <!-- Release version. Bump HERE, then tag the commit `v<Version>` to trigger
-         .github/workflows/release.yml, which packs and pushes to NuGet. -->
+    <!-- Release version. Managed by Release Please (.github/workflows/release-please.yml):
+         merge the release PR to bump this, tag, and publish to NuGet. -->
     <Version>0.1.0-alpha</Version>
     <Authors>Stately</Authors>
     <Company>Stately</Company>
