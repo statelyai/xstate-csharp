@@ -1,0 +1,32 @@
+name: Release Please
+
+# On every push to main, Release Please reads conventional commits (feat:, fix:, feat!: ...)
+# and keeps a release PR open that bumps <Version> in Directory.Build.props and CHANGELOG.md.
+# Merging that PR creates the GitHub release + `v<Version>` tag and publishes to NuGet.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+
+  # A tag created with GITHUB_TOKEN does not fire `on: push: tags`, so call the release
+  # workflow directly instead of relying on the tag trigger.
+  publish:
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets: inherit

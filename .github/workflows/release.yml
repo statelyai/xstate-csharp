@@ -3,10 +3,17 @@ name: Release
 permissions:
   contents: read
 
-# Tag the release commit `v<Version>` (Version lives in Directory.Build.props).
+# Normally invoked by release-please.yml after a release PR is merged. Pushing a
+# `v<Version>` tag by hand (Version lives in Directory.Build.props) also works.
 on:
   push:
     tags: ['v*']
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag, e.g. v0.1.0-alpha
+        required: true
+        type: string
 
 env:
   DOTNET_NOLOGO: true
@@ -20,6 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.tag || github.ref_name }}
           fetch-depth: 0
 
       - name: Set up .NET
@@ -31,9 +39,10 @@ jobs:
 
       - name: Verify the tag matches <Version>
         run: |
+          tag="${{ inputs.tag || github.ref_name }}"
           version=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -1)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag '$GITHUB_REF_NAME' does not match <Version>$version</Version> in Directory.Build.props."
+          if [ "v$version" != "$tag" ]; then
+            echo "::error::Tag '$tag' does not match <Version>$version</Version> in Directory.Build.props."
             exit 1
           fi
 
