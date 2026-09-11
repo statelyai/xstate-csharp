@@ -2,6 +2,7 @@ name: Release
 
 permissions:
   contents: read
+  id-token: write # NuGet Trusted Publishing (OIDC)
 
 # Normally invoked by release-please.yml after a release PR is merged. Pushing a
 # `v<Version>` tag by hand (Version lives in Directory.Build.props) also works.
@@ -84,18 +85,20 @@ jobs:
             artifacts/*.snupkg
           if-no-files-found: error
 
-      # No NUGET_API_KEY secret => nothing is published; the packed artifacts above still
-      # upload, so a tag on a fork or before the secret exists is a harmless dry run.
-      # (The `secrets` context is not available in a step-level `if`, hence the env check.)
+      # Trusted Publishing: nuget.org has a policy for statelyai/xstate-csharp + release.yml
+      # (owner davidkpiano, packages XState*). NuGet/login exchanges the GitHub OIDC token
+      # for a short-lived API key; no stored secret.
+      - name: NuGet login (OIDC)
+        id: nuget-login
+        if: ${{ github.repository == 'statelyai/xstate-csharp' }}
+        uses: NuGet/login@v1
+        with:
+          user: davidkpiano
+
       - name: Push to NuGet
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        if: ${{ github.repository == 'statelyai/xstate-csharp' }}
         run: |
-          if [ -z "$NUGET_API_KEY" ]; then
-            echo "::notice::NUGET_API_KEY is not configured; skipping publish."
-            exit 0
-          fi
           dotnet nuget push "artifacts/*.nupkg" \
-            --api-key "$NUGET_API_KEY" \
+            --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
