@@ -356,7 +356,7 @@ public sealed partial class StateMachine<TContext>
             if (++iterations > MaxMicrosteps)
             {
                 throw new InvalidOperationException(
-                    $"Infinite loop detected in machine '{Id}': more than {MaxMicrosteps} microsteps were " +
+                    $"Infinite loop detected in {StatePath.DescribeMachine(Id)}: more than {MaxMicrosteps} microsteps were " +
                     "processed without reaching a stable state. This usually means a cycle of eventless " +
                     "transitions or raised events (e.g. a -> b -> c -> a).");
             }
@@ -706,8 +706,8 @@ public sealed partial class StateMachine<TContext>
 
     /// <summary>
     /// The generated-id prefix of a spawned/invoked logic — a port of xstate v6
-    /// <c>getActorIdPrefix</c> (<c>system.ts</c>): the logic's own id, unless it is empty or the
-    /// anonymous-machine placeholder, in which case the last-resort prefix <c>x</c> is used.
+    /// <c>getActorIdPrefix</c> (<c>system.ts</c>): the logic's own id, unless it is empty (an
+    /// anonymous machine), in which case the last-resort prefix <c>x</c> is used.
     /// <para>
     /// Deviation from v6: v6 prefers the <em>registered source key</em> when a spawn names its
     /// logic by string (<c>spawn('fetchUser')</c>). This port has no source-name registry — a
@@ -723,22 +723,33 @@ public sealed partial class StateMachine<TContext>
     /// </para>
     /// </summary>
     private static string ActorIdPrefix(IActorLogic logic) =>
-        logic is IMachineLogic { Id: { Length: > 0 } logicId } && logicId != ActorAddress.AnonymousMachineId
+        logic is IMachineLogic { Id: { Length: > 0 } logicId }
             ? logicId
             : "x";
 
     /// <summary>
     /// Allocates the next generated child id (<c>{prefix}:{n}</c>) and advances that prefix's
     /// counter — xstate v6 <c>allocateChildId</c> (<c>transitionActions.ts</c>). The counters ride
-    /// on the snapshot, so a replay from the same snapshot allocates the same ids.
+    /// on the snapshot, so a replay from the same snapshot allocates the same ids. An index whose
+    /// id is already held — by a live child, or as the id of an active state's invoke — is
+    /// skipped (v6 <c>nextFreeChildIndex</c>).
     /// </summary>
     private static string AllocateActorId(Run run, IActorLogic logic)
     {
         var prefix = ActorIdPrefix(logic);
         var next = run.NextActorIds.TryGetValue(prefix, out var counter) ? counter : 0;
+        while (IsActorIdHeld(run, $"{prefix}:{next}"))
+        {
+            next++;
+        }
+
         run.NextActorIds[prefix] = next + 1;
         return $"{prefix}:{next}";
     }
+
+    private static bool IsActorIdHeld(Run run, string id) =>
+        run.Children.Any(c => c.Id == id) ||
+        run.Nodes.Any(n => n.Invokes.Any(i => i.Id == id));
 
     /// <summary>
     /// xstate v6 <c>parseGeneratedActorId</c> + <c>reserveChildId</c> (<c>system.ts</c>,
@@ -1528,7 +1539,7 @@ public sealed partial class StateMachine<TContext>
     {
         var configuration = run.Nodes.Select(n => n.Id).ToHashSet();
         return stateId =>
-            configuration.Contains(stateId.StartsWith('#') ? stateId[1..] : stateId) ||
+            (!stateId.StartsWith('#') && configuration.Contains(stateId)) ||
             (ResolveStateId(stateId) is { } resolved && configuration.Contains(resolved));
     }
 

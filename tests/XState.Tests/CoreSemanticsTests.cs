@@ -445,7 +445,7 @@ public class CoreSemanticsTests
         Assert.Equal(routed, machine.Transition(routed, new RouteEvent("#nope")).State);
         Assert.Equal(routed, machine.Transition(routed, new RouteEvent("#secret")).State);
 
-        Assert.True(machine.Transition(routed, new RouteEvent("#home")).State.Matches("app.home"));
+        Assert.True(machine.Transition(routed, new RouteEvent("#home")).State.Matches("home"));
     }
 
     // ------------------------------------------------------------------

@@ -214,7 +214,7 @@ public sealed class StateNode<TContext>
 {
     public required string Key { get; init; }
 
-    /// <summary>Unique id: explicit, or "{machineId}.{path...}".</summary>
+    /// <summary>Unique id: explicit, or "{machineId}.{path...}" ("{path...}" when the machine id is empty).</summary>
     public required string Id { get; init; }
 
     public StateNode<TContext>? Parent { get; internal set; }
@@ -282,6 +282,9 @@ public sealed class StateNode<TContext>
 
     /// <summary>Human-readable description (xstate v6 <c>description</c>).</summary>
     public string? Description { get; init; }
+
+    /// <summary>Whether <see cref="Id"/> was declared explicitly rather than derived from the key path.</summary>
+    internal bool HasExplicitId { get; init; }
 
     public string Path => Parent is null ? Key : $"{Parent.Path}.{Key}";
 

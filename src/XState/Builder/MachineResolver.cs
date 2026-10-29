@@ -25,8 +25,7 @@ internal static class MachineResolver
     {
         var order = 0;
         var pairs = new List<(StateBuilder<TContext> Builder, StateNode<TContext> Node)>();
-        var aliases = new List<(string Alias, StateNode<TContext> Node)>();
-        var rootNode = BuildNode(root, null, id, id, ref order, pairs, aliases);
+        var rootNode = BuildNode(root, null, id, "", ref order, pairs);
         var actorSources = sources is null
             ? new Dictionary<string, IActorLogic>(StringComparer.Ordinal)
             : new Dictionary<string, IActorLogic>(sources, StringComparer.Ordinal);
@@ -54,11 +53,6 @@ internal static class MachineResolver
         };
         machine.RegisterNodes(rootNode);
 
-        foreach (var (alias, node) in aliases)
-        {
-            machine.RegisterAlias(alias, node);
-        }
-
         // Named actions and guards are resolved against the machine's registries as the tree is
         // walked, and every unresolved name is reported together — the same aggregated style the
         // JSON reader uses, so one build reports every missing implementation rather than the
@@ -75,7 +69,7 @@ internal static class MachineResolver
         if (missing.Count > 0)
         {
             throw new InvalidOperationException(
-                $"Machine '{id}' references implementations that were not provided:" +
+                $"{StatePath.DescribeMachineStart(id)} references implementations that were not provided:" +
                 Environment.NewLine +
                 string.Join(Environment.NewLine, missing.Select(m => "  - " + m)));
         }
@@ -89,24 +83,30 @@ internal static class MachineResolver
         StateBuilder<TContext> builder,
         StateNode<TContext>? parent,
         string machineId,
-        string parentScopedId,
+        string parentKeyPath,
         ref int order,
-        List<(StateBuilder<TContext> Builder, StateNode<TContext> Node)> pairs,
-        List<(string Alias, StateNode<TContext> Node)> aliases)
+        List<(StateBuilder<TContext> Builder, StateNode<TContext> Node)> pairs)
     {
-        // Ids compose from the *key path* from the machine root ("machineId.key1.key2…"), never
-        // from an ancestor's explicit id — an explicit .Id() names one node, it does not re-root
-        // its subtree (stateUtils.ts: `config.id ?? [machine.key, ...path].join('.')`).
-        var id = builder.ExplicitId ?? (parent is null ? machineId : $"{parent.Path}.{builder.Key}");
+        if (parent is not null && StatePath.HasUnescapedDot(builder.Key))
+        {
+            throw new InvalidOperationException(
+                $"State key \"{builder.Key}\" contains \".\" — nest the states or escape it as " +
+                $"\"{System.Text.RegularExpressions.Regex.Replace(builder.Key, @"(?<!\\)\.", @"\\.")}\".");
+        }
 
-        // An id-less node stays addressable relative to its nearest explicitly-id'd ancestor
-        // ("#loaded.child"), registered as an alias so such references keep resolving.
-        var scopedId = builder.ExplicitId ?? (parent is null ? machineId : $"{parentScopedId}.{builder.Key}");
+        // Ids compose from the *key path* from the machine root, prefixed by the machine id when
+        // it has one ("shop.checkout", or "checkout" without one), never from an ancestor's
+        // explicit id — an explicit .Id() names one node, it does not re-root its subtree
+        // (xstate v6 StateNode.ts).
+        var keyPath = parent is null ? "" : parentKeyPath.Length == 0 ? builder.Key : $"{parentKeyPath}.{builder.Key}";
+        var id = builder.ExplicitId ??
+                 (machineId.Length == 0 ? keyPath : keyPath.Length == 0 ? machineId : $"{machineId}.{keyPath}");
 
         var node = new StateNode<TContext>
         {
             Key = builder.Key,
             Id = id,
+            HasExplicitId = builder.ExplicitId is not null,
             Type = builder.Type,
             Order = order++,
             HistoryType = builder.HistoryType,
@@ -123,15 +123,10 @@ internal static class MachineResolver
 
         pairs.Add((builder, node));
 
-        if (scopedId != id)
-        {
-            aliases.Add((scopedId, node));
-        }
-
         var children = new List<StateNode<TContext>>(builder.Children.Count);
         foreach (var childBuilder in builder.Children)
         {
-            children.Add(BuildNode(childBuilder, node, machineId, scopedId, ref order, pairs, aliases));
+            children.Add(BuildNode(childBuilder, node, machineId, keyPath, ref order, pairs));
         }
         node.Children = children;
 
@@ -221,8 +216,8 @@ internal static class MachineResolver
         for (var i = 0; i < builder.Invokes.Count; i++)
         {
             var draft = builder.Invokes[i];
-            // xstate v6 `createInvokeId` (utils.ts): `${index}.${stateNodeId}`, static — no counter.
-            var invokeId = draft.Id ?? $"{i}.{node.Id}";
+            // xstate v6 `createInvokeId` (utils.ts): `${stateNodeId}:${index}`, static — no counter.
+            var invokeId = draft.Id ?? $"{node.Id}:{i}";
             var (logic, src) = ResolveActorSource(machine, draft.Logic, draft.Src, node.Id);
 
             if (draft.Timeout is not null && draft.OnTimeout.Count == 0)
@@ -630,7 +625,7 @@ internal static class MachineResolver
     {
         if (target.StartsWith('#'))
         {
-            return machine.GetNodeById(target[1..]);
+            return machine.GetNodeById(target);
         }
 
         if (target.StartsWith('.'))
@@ -644,7 +639,7 @@ internal static class MachineResolver
         if (source.Parent is null)
         {
             throw new ArgumentException(
-                $"Invalid target '{target}' from the root node of machine '{machine.Id}'. Did you mean '.{target}'?");
+                $"Invalid target '{target}' from the root node of {StatePath.DescribeMachine(machine.Id)}. Did you mean '.{target}'?");
         }
 
         return ResolveRelative(machine, source.Parent, target);
@@ -658,11 +653,11 @@ internal static class MachineResolver
     {
         if (path.StartsWith('#'))
         {
-            return machine.GetNodeById(path[1..]);
+            return machine.GetNodeById(path);
         }
 
         var current = from;
-        foreach (var key in path.Split('.'))
+        foreach (var key in StatePath.Split(path))
         {
             if (key.Length == 0)
             {

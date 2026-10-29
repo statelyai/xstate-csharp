@@ -467,8 +467,8 @@ public class CoreTransitionTests
             .Build();
 
         var spawn = Assert.Single(machine.GetInitialState().Effects.OfType<SpawnEffect>());
-        // xstate v6 `createInvokeId`: `${index}.${stateNodeId}`.
-        Assert.Equal("0.autoid.loading", spawn.Id);
+        // xstate v6 `createInvokeId`: `${stateNodeId}:${index}`.
+        Assert.Equal("autoid.loading:0", spawn.Id);
     }
 
     // --- 11. Descriptor specificity + targetless transitions ---
@@ -805,11 +805,11 @@ public class CoreTransitionTests
     }
 
     [Fact]
-    public void The_anonymous_machine_placeholder_does_not_become_an_id_prefix()
+    public void The_anonymous_machine_id_does_not_become_an_id_prefix()
     {
         var machine = Machine.Create("host")
             .Initial("a")
-            .State("a", s => s.On<Go>(t => t.Do(new SpawnAction<Unit>(ChildMachine("(machine)")))))
+            .State("a", s => s.On<Go>(t => t.Do(new SpawnAction<Unit>(ChildMachine("")))))
             .Build();
 
         var result = machine.Transition(machine.GetInitialState().State, new Go());
@@ -1002,7 +1002,6 @@ public class CoreTransitionTests
     public void The_address_root_is_the_machine_id_unless_it_is_anonymous()
     {
         Assert.Equal("host", ActorAddress.Root("host"));
-        Assert.Equal("x:0", ActorAddress.Root("(machine)"));
         Assert.Equal("x:0", ActorAddress.Root(""));
         Assert.Equal("x:0", ActorAddress.Root(null));
     }

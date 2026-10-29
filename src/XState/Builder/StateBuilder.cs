@@ -126,17 +126,23 @@ public sealed class StateBuilder<TContext>
         return this;
     }
 
+    /// <summary>
+    /// Adds a history state. <paramref name="id"/> optionally gives it an explicit id, as for any
+    /// other state.
+    /// </summary>
     public StateBuilder<TContext> History(
         string key,
         HistoryType type = XState.HistoryType.Shallow,
         string? defaultTarget = null,
-        Action<TransitionBuilder<TContext, MachineEvent>>? configure = null)
+        Action<TransitionBuilder<TContext, MachineEvent>>? configure = null,
+        string? id = null)
     {
         var child = new StateBuilder<TContext>(key)
         {
             Type = StateNodeType.History,
             HistoryType = type,
-            HistoryDefaultTarget = defaultTarget
+            HistoryDefaultTarget = defaultTarget,
+            ExplicitId = id
         };
 
         if (configure is not null)
@@ -381,7 +387,7 @@ public sealed class StateBuilder<TContext>
     /// <summary>
     /// Invokes <paramref name="logic"/> for as long as this state is active. When
     /// <paramref name="id"/> is omitted the actor id is xstate v6's <c>createInvokeId</c>
-    /// (<c>utils.ts</c>) shape: <c>{index}.{stateNodeId}</c>, where <c>index</c> is this
+    /// (<c>utils.ts</c>) shape: <c>{stateNodeId}:{index}</c>, where <c>index</c> is this
     /// invocation's position in the state's invoke list.
     /// </summary>
     public StateBuilder<TContext> Invoke(

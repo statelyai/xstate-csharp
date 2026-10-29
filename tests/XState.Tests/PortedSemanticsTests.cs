@@ -24,7 +24,7 @@ public class PortedSemanticsTests
     {
         var tracked = new List<string>();
 
-        var machine = Machine.Create("(machine)")
+        var machine = Machine.Create("")
             .Root(r => r.Entry(_ => tracked.Add("enter: __root__")))
             .Initial("a")
             .State("a", s => s
@@ -34,7 +34,7 @@ public class PortedSemanticsTests
                     .Entry(_ => tracked.Add("enter: a.a1"))
                     .On("NEXT", t => t.Target("a2")))
                 .State("a2")
-                .On("CHANGE", t => t.Target("#(machine).b")))
+                .On("CHANGE", t => t.Target("#b")))
             .State("b")
             .Build();
 
@@ -48,7 +48,7 @@ public class PortedSemanticsTests
     {
         var tracked = new List<string>();
 
-        var machine = Machine.Create("(machine)")
+        var machine = Machine.Create("")
             .Root(r => r
                 .AsParallel()
                 .Entry(_ => tracked.Add("enter: __root__")))

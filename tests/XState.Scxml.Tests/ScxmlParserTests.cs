@@ -29,7 +29,7 @@ public class ScxmlParserTests
             """,
             "initial=\"s0\"");
 
-        Assert.Equal("(machine)", machine.Id);
+        Assert.Equal("", machine.Id);
         Assert.Equal(["s0", "s1"], machine.Root.Children.Select(c => c.Key));
 
         var initial = machine.GetInitialState().State;
@@ -37,6 +37,23 @@ public class ScxmlParserTests
 
         var next = machine.Transition(initial, Event("go")).State;
         Assert.True(next.Matches("#s1"));
+    }
+
+    [Fact]
+    public void DottedIdIsEscapedInTheKeyAndStaysRawInTheId()
+    {
+        var machine = Parse(
+            """
+            <state id="s.0"><transition event="go" cond="In('s.0')" target="s.1"/></state>
+            <state id="s.1"/>
+            """,
+            "initial=\"s.0\"");
+
+        Assert.Equal(["s\\.0", "s\\.1"], machine.Root.Children.Select(c => c.Key));
+
+        var next = machine.Transition(machine.GetInitialState().State, Event("go")).State;
+        Assert.True(next.Matches("#s.1"));
+        Assert.True(next.Matches("s\\.1"));
     }
 
     [Fact]

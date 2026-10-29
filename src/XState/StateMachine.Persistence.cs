@@ -188,7 +188,7 @@ public sealed partial class StateMachine<TContext>
                 {
                     throw new InvalidOperationException(
                         $"Unable to restore child actor '{persisted.Id}': child source " +
-                        $"'{persisted.Src ?? "<unknown>"}' is not provided in machine '{Id}'.");
+                        $"'{persisted.Src ?? "<unknown>"}' is not provided in {StatePath.DescribeMachine(Id)}.");
                 }
 
                 restored = new ChildToRestore(
@@ -314,7 +314,7 @@ public sealed partial class StateMachine<TContext>
         {
             throw new InvalidOperationException(
                 $"Machine ID mismatch: persisted snapshot was created by machine '{persistedId}', " +
-                $"but machine '{Id}' was provided.");
+                $"but {StatePath.DescribeMachine(Id)} was provided.");
         }
 
         if (persistedVersion != Version)
@@ -323,7 +323,7 @@ public sealed partial class StateMachine<TContext>
             {
                 throw new InvalidOperationException(
                     $"Persisted snapshot version '{persistedVersion ?? "(none)"}' does not match machine " +
-                    $"version '{Version ?? "(none)"}' for machine '{Id}'. Provide a " +
+                    $"version '{Version ?? "(none)"}' for {StatePath.DescribeMachine(Id)}. Provide a " +
                     $"{nameof(RestoreOptions<TContext>)}.{nameof(RestoreOptions<TContext>.Migrate)} " +
                     "function to migrate old snapshots.");
             }
@@ -398,7 +398,7 @@ public sealed partial class StateMachine<TContext>
 
     private InvalidOperationException MissingState(IReadOnlyList<string> path, string key) =>
         new($"Persisted snapshot references state '{string.Join('.', path.Append(key))}' which does " +
-            $"not exist on machine '{Id}'.");
+            $"not exist on {StatePath.DescribeMachine(Id)}.");
 
     private static StateNode<TContext>? ChildByKey(StateNode<TContext> node, string key) =>
         node.Children.FirstOrDefault(c => c.Key == key);
@@ -482,7 +482,7 @@ public sealed partial class StateMachine<TContext>
         if (state is not State<TContext> typed)
         {
             throw new ArgumentException(
-                $"Snapshot of type {state.GetType().Name} does not belong to machine '{Id}' " +
+                $"Snapshot of type {state.GetType().Name} does not belong to {StatePath.DescribeMachine(Id)} " +
                 $"(expected State<{typeof(TContext).Name}>).");
         }
 

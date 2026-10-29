@@ -22,13 +22,6 @@ public static class ActorAddress
     /// <summary>Separator between address segments.</summary>
     public const char Separator = '/';
 
-    /// <summary>
-    /// Placeholder id carried by anonymous machine logic (the SCXML importer uses it for a
-    /// <c>&lt;scxml&gt;</c> without a <c>name</c>). It never earns a named id prefix or a named
-    /// address root.
-    /// </summary>
-    public const string AnonymousMachineId = "(machine)";
-
     /// <summary>Root address of an actor whose logic is anonymous.</summary>
     public const string AnonymousRoot = "x:0";
 
@@ -53,7 +46,7 @@ public static class ActorAddress
     /// when the logic is anonymous (xstate v6 <c>getRootActorId</c>).
     /// </summary>
     public static string Root(string? machineId) =>
-        string.IsNullOrEmpty(machineId) || machineId == AnonymousMachineId
+        string.IsNullOrEmpty(machineId)
             ? AnonymousRoot
             : EncodeSegment(machineId);
 }

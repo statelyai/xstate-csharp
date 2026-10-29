@@ -110,15 +110,15 @@ public sealed record State<TContext> : ISnapshot
         ImmutableDictionary.Create<string, object?>(StringComparer.Ordinal);
 
     /// <summary>
-    /// Whether the given state path/id is active. Accepts full ids ("machine.a.b"),
-    /// relative paths ("a.b"), or explicit ids ("#a").
+    /// Whether the given state path/id is active. Accepts full ids ("machine.a.b"), paths
+    /// relative to the root ("a.b"), or a whole state id after <c>#</c> ("#a") — <c>#</c> is an
+    /// exact id lookup, never an id followed by a path.
     /// </summary>
     public bool Matches(string statePath)
     {
-        if (Configuration.Contains(statePath.StartsWith('#') ? statePath[1..] : statePath))
+        if (!statePath.StartsWith('#') && Configuration.Contains(statePath))
             return true;
 
-        // Explicit ids and key paths are aliases of the same node, so resolve through the machine.
         return Machine?.ResolveStateId(statePath) is { } resolved && Configuration.Contains(resolved);
     }
 

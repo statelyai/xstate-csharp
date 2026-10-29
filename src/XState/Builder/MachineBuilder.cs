@@ -39,7 +39,8 @@ public sealed class MachineBuilder<TContext>
 
     /// <summary>
     /// The machine's version (xstate v6 <c>machineVersion</c>), recorded on the definition so a
-    /// durable host can refuse a snapshot persisted by an incompatible one.
+    /// durable host can refuse a snapshot persisted by an incompatible one. A versioned machine
+    /// must declare a non-empty id.
     /// </summary>
     public MachineBuilder<TContext> Version(string version)
     {
@@ -60,7 +61,7 @@ public sealed class MachineBuilder<TContext>
         if (!_sources.TryAdd(source, logic))
         {
             throw new InvalidOperationException(
-                $"Machine '{Id}' already registers an actor source named '{source}'.");
+                $"{StatePath.DescribeMachineStart(Id)} already registers an actor source named '{source}'.");
         }
 
         return this;
@@ -206,9 +207,12 @@ public sealed class MachineBuilder<TContext>
 
     public StateMachine<TContext> Build()
     {
+        if (_version is not null && string.IsNullOrEmpty(Id))
+            throw new InvalidOperationException($"Machine with version '{_version}' must declare an id.");
+
         if (_contextFactory is null && typeof(TContext) != typeof(Unit))
             throw new InvalidOperationException(
-                $"Machine '{Id}' has context type {typeof(TContext).Name} but no .Context(...) factory.");
+                $"{StatePath.DescribeMachineStart(Id)} has context type {typeof(TContext).Name} but no .Context(...) factory.");
 
         return MachineResolver.Resolve(
             Id,
