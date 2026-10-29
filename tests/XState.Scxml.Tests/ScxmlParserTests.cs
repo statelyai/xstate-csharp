@@ -183,7 +183,7 @@ public class ScxmlParserTests
     /// <summary>The <c>xstate.log</c> action effects of a transition, as their parameters.</summary>
     private static IEnumerable<LogParams> LogParamsOf(IEnumerable<Effect> effects) =>
         effects.OfType<ActionEffect>()
-            .Where(a => a.Type == "xstate.log")
+            .Where(a => a.Type == "@xstate.log")
             .Select(a => (LogParams)a.Params!);
 
     [Fact]
@@ -870,7 +870,7 @@ public class ScxmlParserTests
 
         var result = machine.GetInitialState();
         var logs = result.Effects.OfType<ActionEffect>()
-            .Where(a => a.Type == "xstate.log")
+            .Where(a => a.Type == "@xstate.log")
             .Select(a => (LogParams)a.Params!)
             .ToList();
 

@@ -578,7 +578,7 @@ public sealed class DeterministicInterpreter
             switch (effect)
             {
                 case ActionEffect action:
-                    if (action is { Type: "xstate.log", Params: LogParams log })
+                    if (action is { Type: "@xstate.log", Params: LogParams log })
                     {
                         _log.Add(new LogEntry(log.Label, log.Message));
                     }

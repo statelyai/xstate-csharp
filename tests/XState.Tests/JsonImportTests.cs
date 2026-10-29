@@ -264,9 +264,7 @@ public class JsonImportTests
               "states": {
                 "work": {
                   "type": "parallel",
-                  "on": {
-                    "xstate.done.state.agg.work": { "target": "success", "actions": "capture" }
-                  },
+                  "onDone": { "target": "success", "actions": "capture" },
                   "states": {
                     "upload": {
                       "initial": "pending",
@@ -895,7 +893,7 @@ public class JsonImportTests
             """);
 
         var effect = Assert.Single(
-            machine.GetInitialState().Effects.OfType<ActionEffect>(), e => e.Type == "xstate.log");
+            machine.GetInitialState().Effects.OfType<ActionEffect>(), e => e.Type == "@xstate.log");
         var @params = Assert.IsType<LogParams>(effect.Params);
 
         Assert.Equal("hello", Assert.IsType<JsonElement>(@params.Message).GetString());
@@ -1078,11 +1076,11 @@ public class JsonImportTests
                         "GO": [
                           {
                             "target": "allowed",
-                            "guard": { "type": "xstate.stateIn", "params": { "stateId": "#ready" } }
+                            "guard": { "type": "@xstate.stateIn", "params": { "stateId": "#ready" } }
                           },
                           {
                             "target": "denied",
-                            "guard": { "type": "xstate.not", "params": { "guard": { "type": "never" } } }
+                            "guard": { "type": "@xstate.not", "params": { "guard": { "type": "never" } } }
                           }
                         ]
                       }
@@ -1101,7 +1099,7 @@ public class JsonImportTests
         var machine = MachineConfig.FromJson(Config, Impls());
         Assert.True(machine.Transition(machine.GetInitialState().State, Ev("GO")).State.Matches("right.allowed"));
 
-        // With the left region elsewhere, `xstate.stateIn` fails and `xstate.not(never)` wins.
+        // With the left region elsewhere, `@xstate.stateIn` fails and `@xstate.not(never)` wins.
         var moved = MachineConfig.FromJson(Config.Replace("\"initial\": \"idle\"", "\"initial\": \"busy\""), Impls());
         Assert.True(moved.Transition(moved.GetInitialState().State, Ev("GO")).State.Matches("right.denied"));
     }

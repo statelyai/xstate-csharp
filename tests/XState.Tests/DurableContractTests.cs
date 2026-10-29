@@ -15,10 +15,11 @@ public class DurableContractTests
     // --- Canonical event spellings (v6 constants.ts) ---
 
     [Fact]
-    public void Lifecycle_events_use_the_reserved_at_xstate_namespace()
+    public void Lifecycle_events_use_the_reserved_xstate_namespace()
     {
-        Assert.Equal("@xstate.init", new InitEvent().Type);
-        Assert.Equal("@xstate.stop", new StopEvent().Type);
+        Assert.Equal("xstate.init", new InitEvent().Type);
+        Assert.Equal("xstate.stop", new StopEvent().Type);
+        Assert.Equal("xstate.timeout.state", new TimeoutEvent("s").Type);
         Assert.Equal("xstate.timer", new TimerEvent("t").Type);
     }
 
@@ -414,5 +415,67 @@ public class DurableContractTests
 
         Assert.True(state.HasTag("busy"));
         Assert.Equal(["busy"], state.Tags);
+    }
+
+    // --- Reserved names (v6 alpha.68) ---
+
+    [Theory]
+    [InlineData("xstate.done.actor.job", "xstate.done.actor")]
+    [InlineData("xstate.error.actor.job", "xstate.error.actor")]
+    [InlineData("xstate.snapshot.job", "xstate.snapshot.actor")]
+    [InlineData("xstate.done.state.m.p", "xstate.done.state")]
+    [InlineData("xstate.after.1000.m.a", "xstate.after")]
+    [InlineData("xstate.timeout.m.a", "xstate.timeout.state")]
+    [InlineData("xstate.timeout.actor.job", "xstate.timeout.actor")]
+    public void Suffixed_lifecycle_transition_keys_are_rejected(string key, string category)
+    {
+        var expected = $"Obsolete event type '{key}': suffixed lifecycle events are no longer matched. " +
+                       $"Use '{category}' with a matches filter.";
+
+        var built = Assert.ThrowsAny<Exception>(() =>
+            Machine.Create("m").Initial("a").State("a", a => a.On(key, t => t.Target("a"))).Build());
+        Assert.Contains(expected, built.Message);
+
+        var json = Assert.ThrowsAny<Exception>(() => XState.Json.MachineConfig.FromJson(
+            $$"""{ "id": "m", "initial": "a", "states": { "a": { "on": { "{{key}}": "a" } } } }"""));
+        Assert.Contains(expected, json.ToString());
+    }
+
+    [Theory]
+    [InlineData("xstate.done.actor")]
+    [InlineData("xstate.timeout.state")]
+    [InlineData("xstate.snapshot.actor")]
+    [InlineData("xstate.error.*")]
+    public void Category_transition_keys_are_accepted(string key) =>
+        Machine.Create("m").Initial("a").State("a", a => a.On(key, t => t.Target("a"))).Build();
+
+    [Theory]
+    [InlineData("xstate.custom")]
+    [InlineData("@xstate.custom")]
+    public void Reserved_source_names_are_rejected(string name)
+    {
+        var expected = $"the 'xstate.' and '@xstate.' prefixes are reserved for built-in names.";
+
+        Assert.Contains(expected, Assert.ThrowsAny<Exception>(() =>
+            Machine.Create("m").Action(name, _ => { })).Message);
+        Assert.Contains(expected, Assert.ThrowsAny<Exception>(() =>
+            Machine.Create("m").Guard(name, _ => true)).Message);
+        Assert.Contains(expected, Assert.ThrowsAny<Exception>(() =>
+            Machine.Create("m").Actor(name, Child())).Message);
+        Assert.Contains(expected, Assert.ThrowsAny<Exception>(() =>
+            new XState.Json.MachineImplementations<System.Text.Json.JsonElement>().Delay(name, TimeSpan.FromSeconds(1))).Message);
+
+        foreach (var kind in new[] { "actions", "guards", "delays" })
+        {
+            var body = kind switch
+            {
+                "actions" => "{ \"type\": \"@xstate.raise\", \"event\": { \"type\": \"E\" } }",
+                "guards" => "{ \"when\": { \"type\": \"g\" } }",
+                _ => "1000",
+            };
+            var error = Assert.ThrowsAny<Exception>(() => XState.Json.MachineConfig.FromJson(
+                $$"""{ "id": "m", "initial": "a", "states": { "a": {} }, "{{kind}}": { "{{name}}": {{body}} } }"""));
+            Assert.Contains($"Invalid {kind} name '{name}'", error.ToString());
+        }
     }
 }

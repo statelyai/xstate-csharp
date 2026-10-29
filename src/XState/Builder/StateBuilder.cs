@@ -267,6 +267,7 @@ public sealed class StateBuilder<TContext>
     /// <summary>String transition: matches Event.Type with SCXML wildcard rules ("*", "error.*").</summary>
     public StateBuilder<TContext> On(string eventPattern, Action<TransitionBuilder<TContext, MachineEvent>>? configure = null)
     {
+        ReservedNames.AssertNotObsoleteEventType(eventPattern);
         var t = new TransitionBuilder<TContext, MachineEvent>(new EventDescriptor.ByPattern(eventPattern));
         configure?.Invoke(t);
         Transitions.Add(t.Draft);

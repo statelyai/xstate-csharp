@@ -243,7 +243,7 @@ public class CoreTransitionTests
                     .State("running", c => c.On<Finish2>(t => t.Target("done")))
                     .Final("done")))
             .State("finished")
-            .Root(r => r.On("xstate.done.state.par.p", t => t.Target(".finished")))
+            .Root(r => r.On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "par.p").Target(".finished")))
             .Build();
 
         var state = machine.GetInitialState().State;
@@ -413,7 +413,7 @@ public class CoreTransitionTests
                 .Initial("working")
                 .State("working", c => c.On<Finish>(t => t.Target("complete")))
                 .Final("complete", c => c.Output(_ => "ok"))
-                .On("xstate.done.state.nested-final.a", t => t.Target("b")))
+                .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "nested-final.a").Target("b")))
             .State("b")
             .Build();
 
@@ -586,7 +586,7 @@ public class CoreTransitionTests
             e =>
             {
                 var action = Assert.IsType<ActionEffect>(e);
-                Assert.Equal("xstate.log", action.Type);
+                Assert.Equal("@xstate.log", action.Type);
                 var log = Assert.IsType<LogParams>(action.Params);
                 Assert.Equal("hello", log.Message);
                 Assert.Equal("label", log.Label);
@@ -1106,7 +1106,7 @@ public class CoreTransitionTests
 
         Assert.Equal(SnapshotStatus.Stopped, stopped.State.Status);
 
-        // v6 `macrostep`'s `@xstate.stop` branch is `stopChildren` + `cancelTimers` and nothing
+        // v6 `macrostep`'s `xstate.stop` branch is `stopChildren` + `cancelTimers` and nothing
         // else: stopping is not an exit, so no exit action runs.
         Assert.Empty(log);
         Assert.Contains(stopped.Effects, e => e is CancelEffect { SendId: "later" });

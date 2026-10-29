@@ -253,7 +253,7 @@ public sealed partial class StateMachine<TContext> : IMachineLogic
     /// <summary>
     /// Stops the machine: stops every live child, cancels every outstanding timer, and returns a
     /// stopped snapshot. Exit actions do <em>not</em> run (xstate v6 <c>macrostep</c>'s
-    /// <c>@xstate.stop</c> branch: <c>stopChildren</c> + <c>cancelTimers</c> only).
+    /// <c>xstate.stop</c> branch: <c>stopChildren</c> + <c>cancelTimers</c> only).
     /// </summary>
     public TransitionResult<TContext> Stop(State<TContext> state) => Transition(state, new StopEvent());
 

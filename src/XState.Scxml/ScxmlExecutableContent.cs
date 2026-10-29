@@ -220,7 +220,7 @@ internal static class ScxmlExecutableContent
         }
 
         sink.Effects.Add(new ActionEffect(
-            "xstate.log",
+            "@xstate.log",
             new LogParams(message, element.Attribute("label")?.Value),
             () => { }));
         return true;

@@ -56,6 +56,7 @@ public sealed class MachineBuilder<TContext>
     public MachineBuilder<TContext> Actor(string source, IActorLogic logic)
     {
         ArgumentException.ThrowIfNullOrEmpty(source);
+        ReservedNames.AssertUnreservedSourceName("actor", source);
         ArgumentNullException.ThrowIfNull(logic);
 
         if (!_sources.TryAdd(source, logic))
@@ -75,6 +76,7 @@ public sealed class MachineBuilder<TContext>
     public MachineBuilder<TContext> Action(string name, ActionDefinition<TContext> action)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
+        ReservedNames.AssertUnreservedSourceName("action", name);
         ArgumentNullException.ThrowIfNull(action);
         _actions[name] = action with { Name = name };
         return this;
@@ -84,6 +86,7 @@ public sealed class MachineBuilder<TContext>
     public MachineBuilder<TContext> Action(string name, Action<ActionArgs<TContext>> action)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
+        ReservedNames.AssertUnreservedSourceName("action", name);
         ArgumentNullException.ThrowIfNull(action);
         _actions[name] = new CustomAction<TContext>(action) { Name = name };
         return this;
@@ -97,6 +100,7 @@ public sealed class MachineBuilder<TContext>
     public MachineBuilder<TContext> Guard(string name, Guard<TContext> guard)
     {
         ArgumentException.ThrowIfNullOrEmpty(name);
+        ReservedNames.AssertUnreservedSourceName("guard", name);
         ArgumentNullException.ThrowIfNull(guard);
         _guards[name] = guard;
         return this;

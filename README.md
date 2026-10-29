@@ -137,7 +137,7 @@ var machine = MachineConfig.FromJson(json, new MachineImplementations<JsonElemen
 
 The reader follows the v6 `machine.schema.json`: `params`, `meta`, `description`, `version`,
 `timeout`/`onTimeout`, `onError`, `onSnapshot`, state and transition `input`, root `actions`/`guards`
-maps, built-in `@xstate.raise`/`cancel`/`log`/`emit`/`assign` actions, and `xstate.stateIn`/`xstate.not`
+maps, built-in `@xstate.raise`/`cancel`/`log`/`emit`/`assign` actions, and `@xstate.stateIn`/`@xstate.not`
 guards. Unknown keys throw with their JSON path (relax with `JsonConfigOptions.IgnoreUnknownKeys`).
 Keys v6 defines but the port cannot honour (`route`, `matches`, `@expr`, non-empty `schemas`)
 throw `NotSupportedException`. `MachineConfig.ToJson(machine)` returns the source config verbatim

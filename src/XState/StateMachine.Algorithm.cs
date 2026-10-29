@@ -122,7 +122,7 @@ public sealed partial class StateMachine<TContext>
 
         var run = NewRun(state);
 
-        // @xstate.stop: stop the children, cancel the timers, done. No state is exited, so no
+        // xstate.stop: stop the children, cancel the timers, done. No state is exited, so no
         // exit action runs (stateUtils.ts `macrostep`, the XSTATE_STOP branch).
         if (evt is StopEvent)
         {
@@ -1186,7 +1186,7 @@ public sealed partial class StateMachine<TContext>
     // --- Actions -> context updates / raised events / effects ---
 
     /// <summary>Portable action type of the built-in <c>log</c> action.</summary>
-    internal const string LogActionType = "xstate.log";
+    internal const string LogActionType = "@xstate.log";
 
     /// <summary>
     /// Action args scoped to one state: its own <see cref="ActionArgs{TContext}.Input"/> plus the
@@ -1545,17 +1545,15 @@ public sealed partial class StateMachine<TContext>
 
     /// <summary>
     /// Candidate transitions for an event — a port of xstate v6 <c>getCandidates</c>
-    /// (<c>stateUtils.ts</c>): every descriptor that names the event type (or one of its legacy
-    /// aliases) exactly comes first in document order, then the descriptors that only matched by
+    /// (<c>stateUtils.ts</c>): every descriptor that names the event type exactly comes first in document order, then the descriptors that only matched by
     /// wildcard, <em>longest descriptor string first</em>.
     /// </summary>
     private static IEnumerable<TransitionDefinition<TContext>> Candidates(
         StateNode<TContext> node,
         MachineEvent evt)
     {
-        var aliases = EventAliases(evt);
         var matching = node.Transitions
-            .Where(t => t.Event is not null && DescriptorMatches(t.Event, evt, aliases))
+            .Where(t => t.Event is not null && t.Event.Matches(evt))
             .ToList();
 
         if (matching.Count == 0)
@@ -1563,9 +1561,9 @@ public sealed partial class StateMachine<TContext>
             return [];
         }
 
-        var exact = matching.Where(t => IsExactDescriptor(t.Event!, evt, aliases)).OrderBy(t => t.Order);
+        var exact = matching.Where(t => IsExactDescriptor(t.Event!, evt)).OrderBy(t => t.Order);
         var wildcard = matching
-            .Where(t => !IsExactDescriptor(t.Event!, evt, aliases))
+            .Where(t => !IsExactDescriptor(t.Event!, evt))
             .OrderByDescending(t => DescriptorLength(t.Event!))
             .ThenBy(t => t.Order);
 
@@ -1579,55 +1577,12 @@ public sealed partial class StateMachine<TContext>
     /// </summary>
     private static bool IsExactDescriptor(
         EventDescriptor descriptor,
-        MachineEvent evt,
-        IReadOnlyList<string> aliases) =>
+        MachineEvent evt) =>
         descriptor is not EventDescriptor.ByPattern pattern ||
-        pattern.Pattern == evt.Type ||
-        aliases.Contains(pattern.Pattern);
+        pattern.Pattern == evt.Type;
 
     private static int DescriptorLength(EventDescriptor descriptor) =>
         descriptor is EventDescriptor.ByPattern pattern ? pattern.Pattern.Length : int.MaxValue;
-
-    private static bool DescriptorMatches(EventDescriptor descriptor, MachineEvent evt, IReadOnlyList<string> aliases)
-    {
-        if (descriptor.Matches(evt))
-        {
-            return true;
-        }
-
-        // Legacy/flattened descriptors: `xstate.done.state.{stateId}`, `xstate.after.{delay}.{stateId}`, ...
-        return descriptor is EventDescriptor.ByPattern pattern &&
-               aliases.Any(alias => MatchesPattern(pattern.Pattern, alias));
-    }
-
-    /// <summary>
-    /// utils.ts `matchesEventDescriptor` — strict: only an explicit trailing ".*"
-    /// matches a prefix, so "xstate.done.state.a" does not match a child's
-    /// "xstate.done.state.a.b".
-    /// </summary>
-    private static bool MatchesPattern(string pattern, string type)
-    {
-        if (pattern == "*" || pattern == type)
-        {
-            return true;
-        }
-
-        return pattern.EndsWith(".*", StringComparison.Ordinal) &&
-               type.StartsWith(pattern[..^1], StringComparison.Ordinal);
-    }
-
-    /// <summary>eventUtils.ts `getEventTypeAliases` (minus the canonical type itself).</summary>
-    private static IReadOnlyList<string> EventAliases(MachineEvent evt) => evt switch
-    {
-        DoneStateEvent e => [$"xstate.done.state.{e.StateId}"],
-        DoneActorEvent e => [$"xstate.done.actor.{e.ActorId}"],
-        ErrorActorEvent e => [$"xstate.error.actor.{e.ActorId}"],
-        AfterEvent e => [$"xstate.after.{e.Delay}.{e.StateId}"],
-        TimeoutEvent e => [$"xstate.timeout.{e.StateId}"],
-        ActorTimeoutEvent e => [$"xstate.timeout.actor.{e.ActorId}"],
-        SnapshotEvent e => [$"xstate.snapshot.{e.ActorId}"],
-        _ => []
-    };
 
     // --- Conflict resolution / transition domain (SCXML) ---
 

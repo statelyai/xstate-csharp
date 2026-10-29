@@ -145,7 +145,7 @@ public sealed class ScxmlDataModel : IEquatable<ScxmlDataModel>
         var active = _session.ActiveStates;
         _session.InPredicate = inPredicate ?? (id => active.Contains(id.StartsWith('#') ? id[1..] : id));
 
-        // Neither @xstate.init nor xstate.timer is an SCXML event, so neither binds _event: a
+        // Neither xstate.init nor xstate.timer is an SCXML event, so neither binds _event: a
         // timer firing is the host reporting elapsed time, and the event it releases arrives
         // separately (raised onto the internal queue, or delivered as its own external event).
         if (evt is not null and not InitEvent and not TimerEvent)

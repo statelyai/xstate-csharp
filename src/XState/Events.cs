@@ -19,19 +19,19 @@ public sealed record NamedEvent(string Name, object? Data = null) : MachineEvent
 
 // --- Canonical internal events (mirror xstate v6 eventUtils.ts / constants.ts) ---
 
-/// <summary>@xstate.init (v6 <c>XSTATE_INIT</c>).</summary>
+/// <summary>xstate.init (v6 <c>XSTATE_INIT</c>).</summary>
 public sealed record InitEvent(object? Input = null) : MachineEvent
 {
-    public override string Type => "@xstate.init";
+    public override string Type => "xstate.init";
 }
 
 /// <summary>
-/// @xstate.stop (v6 <c>XSTATE_STOP</c>) — the actor is being stopped. Stopping stops the
+/// xstate.stop (v6 <c>XSTATE_STOP</c>) — the actor is being stopped. Stopping stops the
 /// live children and cancels the outstanding timers; it does <em>not</em> run exit actions.
 /// </summary>
 public sealed record StopEvent : MachineEvent
 {
-    public override string Type => "@xstate.stop";
+    public override string Type => "xstate.stop";
 }
 
 /// <summary>
@@ -83,10 +83,10 @@ public sealed record AfterEvent(object Delay, string StateId) : MachineEvent
     public string SendId => $"xstate.after.{Delay}.{StateId}";
 }
 
-/// <summary>xstate.timeout — a state-level timeout elapsed without the state exiting.</summary>
+/// <summary>xstate.timeout.state — a state-level timeout elapsed without the state exiting.</summary>
 public sealed record TimeoutEvent(string StateId) : MachineEvent
 {
-    public override string Type => "xstate.timeout";
+    public override string Type => "xstate.timeout.state";
 
     public string SendId => $"xstate.timeout.{StateId}";
 }
