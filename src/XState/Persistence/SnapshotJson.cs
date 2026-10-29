@@ -40,7 +40,8 @@ public static class SnapshotJson
             return JsonSerializer.Deserialize<PersistedSnapshot>(json, options ?? DefaultOptions())
                    ?? throw new InvalidSnapshotException("Persisted snapshot cannot be null.");
         }
-        catch (JsonException e)
+        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException
+                                  and not InvalidSnapshotException)
         {
             throw new InvalidSnapshotException($"Persisted snapshot is malformed: {e.Message}", e);
         }
@@ -557,7 +558,8 @@ internal sealed class PersistedTimerConverter : JsonConverter<PersistedTimer>
             Seq = seq,
             DelayMs = delay.GetDouble(),
             Type = type,
-            Event = evt.Deserialize<MachineEvent>(options)!,
+            Event = evt.Deserialize<MachineEvent>(options)
+                    ?? throw new InvalidSnapshotException("Persisted timer has no event."),
             Target = target,
             TargetActor = targetActor,
             ScheduledAt = e.TryGetProperty("scheduledAt", out var at) && at.ValueKind is JsonValueKind.Number
