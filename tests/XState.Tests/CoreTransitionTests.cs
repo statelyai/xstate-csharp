@@ -206,8 +206,12 @@ public class CoreTransitionTests
             .State("b", s => s.Always(t => t.Target("a")))
             .Build();
 
-        var ex = Assert.Throws<InvalidOperationException>(() => machine.GetInitialState());
+        var ex = Assert.Throws<InfiniteTransitionError>(() => machine.GetInitialState());
         Assert.Contains("Infinite loop", ex.Message);
+        Assert.Equal("loop", ex.ActorId);
+        Assert.Equal("xstate.init", ex.Event.Type);
+        Assert.Equal(1000, ex.MaxIterations);
+        Assert.Equal(["a", "b", "a", "b", "a"], ex.States);
     }
 
     // --- 5. Raised events ---

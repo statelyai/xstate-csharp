@@ -350,15 +350,14 @@ public sealed partial class StateMachine<TContext>
         var nextEvent = evt;
         var shouldSelectEventless = true;
         var iterations = 0;
+        // The last few state values visited, for the infinite-loop error (stateUtils.ts macrostep).
+        var recentStates = new List<object>();
 
         while (run.Status is SnapshotStatus.Active)
         {
             if (++iterations > MaxMicrosteps)
             {
-                throw new InvalidOperationException(
-                    $"Infinite loop detected in {StatePath.DescribeMachine(Id)}: more than {MaxMicrosteps} microsteps were " +
-                    "processed without reaching a stable state. This usually means a cycle of eventless " +
-                    "transitions or raised events (e.g. a -> b -> c -> a).");
+                throw new InfiniteTransitionError(Id, evt, MaxMicrosteps, recentStates);
             }
 
             var enabled = shouldSelectEventless ? SelectEventlessTransitions(run, nextEvent) : [];
@@ -379,6 +378,12 @@ public sealed partial class StateMachine<TContext>
             }
 
             Microstep(run, enabled, nextEvent, isInitial: false);
+
+            recentStates.Add(StateValueOf(run.Nodes.OrderBy(n => n.Order).Select(n => n.Id)));
+            if (recentStates.Count > 5)
+            {
+                recentStates.RemoveAt(0);
+            }
 
             // Eventless transitions are only re-selected if the microstep changed something.
             shouldSelectEventless = !hadEventless || Changed(before, run);
@@ -472,6 +477,16 @@ public sealed partial class StateMachine<TContext>
             // Exit actions read the state input the state was *entered* with, so they run before
             // this transition's own input is recorded (stateUtils.ts:1573-1583).
             ExitStates(run, filtered, evt);
+
+            // Keep only the inputs of states still active after exiting, so exited (and
+            // re-entered) states never see a stale input (stateUtils.ts:1842-1854).
+            foreach (var id in run.StateInputs.Keys.ToList())
+            {
+                if (!run.Nodes.Any(n => n.Id == id))
+                {
+                    run.StateInputs.Remove(id);
+                }
+            }
         }
 
         // Transition content runs between exit and entry, scoped to the source state's input.
@@ -480,9 +495,9 @@ public sealed partial class StateMachine<TContext>
             RunActions(run, transition.Actions, evt, transition.Source.Id);
         }
 
-        // xstate v6 stateUtils.ts:1855-1867: the input a transition carries is recorded under
-        // *every* target's id, before the entry pass — so the entering state's own entry actions,
-        // invokes and output already see it. Entries are never pruned.
+        // xstate v6 stateUtils.ts:1855-1867: the input a transition carries is recorded under each
+        // target the transition actually enters, before the entry pass — so the entering state's
+        // own entry actions, invokes and output already see it.
         foreach (var transition in filtered)
         {
             ApplyTransitionInput(run, transition, evt);
@@ -1000,8 +1015,6 @@ public sealed partial class StateMachine<TContext>
         {
             run.Nodes.Add(node);
 
-            ScheduleDelayedTransitions(run, node, evt);
-
             // Invoked actors are spawned *before* the entry actions run (xstate v6 order), so
             // an entry action can already address the child by id — unless the machine defers
             // invocations to the end of the macrostep (SCXML order), in which case the node is
@@ -1026,7 +1039,7 @@ public sealed partial class StateMachine<TContext>
                 // then any history default transition rooted at this node (stateUtils.ts:1963-1999).
                 if (node.InitialTransition is { } initial)
                 {
-                    ApplyTransitionInput(run, initial, evt);
+                    ApplyTransitionInput(run, initial, evt, defaultEntry: true);
                     RunActions(run, initial.Actions, evt, node.Id);
                 }
 
@@ -1034,11 +1047,15 @@ public sealed partial class StateMachine<TContext>
                 {
                     foreach (var defaultTransition in defaults)
                     {
-                        ApplyTransitionInput(run, defaultTransition, evt);
+                        ApplyTransitionInput(run, defaultTransition, evt, defaultEntry: true);
                         RunActions(run, defaultTransition.Actions, evt, node.Id);
                     }
                 }
             }
+
+            // Delays resolve against the context the entry actions just produced (xstate v6 #5756);
+            // cancel-on-exit order is unchanged.
+            ScheduleDelayedTransitions(run, node, evt);
 
             if (node.Type is not StateNodeType.Final)
             {
@@ -1093,12 +1110,13 @@ public sealed partial class StateMachine<TContext>
     }
 
     /// <summary>
-    /// Records the input a transition carries under every one of its targets
+    /// Records the input a transition carries under each of its targets that it enters
     /// (xstate v6 <c>_stateInputs</c>, stateUtils.ts:1855-1867). A targetless transition records
-    /// nothing, and the ledger is never pruned — an entry is only ever overwritten by a later
-    /// entry of the same state.
+    /// nothing; a target still active after the exit pass (not re-entered) keeps its old input.
+    /// Initial and history default transitions (<paramref name="defaultEntry"/>) always record.
     /// </summary>
-    private static void ApplyTransitionInput(Run run, TransitionDefinition<TContext> transition, MachineEvent evt)
+    private static void ApplyTransitionInput(
+        Run run, TransitionDefinition<TContext> transition, MachineEvent evt, bool defaultEntry = false)
     {
         if (transition.InputResolver is null || transition.Targets.Count == 0)
         {
@@ -1109,6 +1127,11 @@ public sealed partial class StateMachine<TContext>
 
         foreach (var target in transition.Targets)
         {
+            if (!defaultEntry && run.Nodes.Contains(target))
+            {
+                continue;
+            }
+
             run.StateInputs[target.Id] = input;
         }
     }
@@ -1377,8 +1400,8 @@ public sealed partial class StateMachine<TContext>
         }
 
         // A state-level `timeout` is its own event category, so it can never collide with an
-        // `after` entry on the same state (stateUtils.ts:466-470). The delay is resolved eagerly,
-        // here at entry time; `onTimeout` sees the input as it stands when the timer fires.
+        // `after` entry on the same state (stateUtils.ts:466-470). The delay is resolved once,
+        // after the state's entry actions (so it sees post-entry context); `onTimeout` sees the input as it stands when the timer fires.
         if (node.Timeout is not null)
         {
             Emit(run, new RaiseEffect(

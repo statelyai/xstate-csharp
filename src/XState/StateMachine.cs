@@ -52,7 +52,8 @@ public sealed partial class StateMachine<TContext> : IMachineLogic
 
     /// <summary>
     /// Hard cap on the microsteps one macrostep may take before the machine is declared to be
-    /// looping (xstate v6 <c>macrostep</c> throws above 1000).
+    /// looping: exceeding it throws <see cref="InfiniteTransitionError"/>. Named
+    /// <c>maxIterations</c> upstream (xstate v6 <c>options.maxIterations</c>, default 1000).
     /// </summary>
     public int MaxMicrosteps { get; init; } = 1000;
 

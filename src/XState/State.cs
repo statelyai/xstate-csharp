@@ -101,10 +101,10 @@ public sealed record State<TContext> : ISnapshot
 
     /// <summary>
     /// Per-state input (xstate v6 <c>_stateInputs</c>): the value the transition that entered a
-    /// state carried for it, keyed by state id. Entries are never pruned on exit (v6 keeps
-    /// <c>_stateInputs</c> the same way): an inactive state's last input stays readable until the
-    /// next transition into it overwrites it. Surfaced to that state's entry/exit actions, invoke
-    /// input resolvers and final-state output resolvers as <see cref="ActionArgs{TContext}.Input"/>.
+    /// state carried for it, keyed by state id. Only active states carry an entry: an exited
+    /// state's input is dropped, and a transition onto an already-active target it does not
+    /// re-enter leaves that target's input as it was. Surfaced to that state's entry/exit actions,
+    /// invoke input resolvers and final-state output resolvers as <see cref="ActionArgs{TContext}.Input"/>.
     /// </summary>
     public ImmutableDictionary<string, object?> StateInputs { get; internal init; } =
         ImmutableDictionary.Create<string, object?>(StringComparer.Ordinal);
