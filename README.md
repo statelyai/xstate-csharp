@@ -104,7 +104,8 @@ other operation throws by name rather than quietly running local behaviour.
 
 Persistence is pure: `machine.Persist(state)` yields plain data, and `machine.Restore(persisted)`
 returns the snapshot plus the children and timers the machine expects but cannot re-create.
-Restore refuses a snapshot from a different machine or version.
+Restore refuses a snapshot from a different machine or version. `SnapshotJson` reads and writes
+xstate v6's `persisted-snapshot/v1` JSON.
 
 - [`docs/durable-hosts.md`](docs/durable-hosts.md): host contract (identity, timers, effect ids, journaling, determinism, checkpoints)
 - [`docs/persistence.md`](docs/persistence.md): persist/restore, JSON, versions and migrations

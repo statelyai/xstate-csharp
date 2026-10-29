@@ -22,8 +22,8 @@ public sealed partial class StateMachine<TContext>
 
     /// <summary>
     /// Reduces <paramref name="state"/> to plain data. Throws rather than writing a snapshot that
-    /// could never be restored: an inline child (no registered source key) has nothing to name its
-    /// logic, and a timer aimed at an actor the snapshot no longer knows has nothing to re-arm
+    /// could never be restored: an inline <em>spawned</em> child (no registered source key) has
+    /// nothing to name its logic, and a timer aimed at an actor the snapshot no longer knows has nothing to re-arm
     /// against.
     /// </summary>
     public PersistedSnapshot Persist(State<TContext> state, PersistOptions? options = null)
@@ -33,12 +33,19 @@ public sealed partial class StateMachine<TContext>
         options ??= new PersistOptions();
         var rootAddress = options.RootAddress ?? ActorAddress.Root(Id);
 
+        // An inline invoke persists without `src` and restores through its invoke definition
+        // (v6 ceeebb056c), so only a child no active state invokes needs a source key.
+        var invokedIds = state.Configuration
+            .SelectMany(id => _idMap[id].Invokes)
+            .Select(invoke => invoke.Id)
+            .ToHashSet(StringComparer.Ordinal);
+
         var children = new List<PersistedChild>(state.Children.Length);
         foreach (var child in state.Children)
         {
             // v6 State.ts:606-613. The check is about the *source key*, not the logic: without one
             // there is no portable name for what to re-create.
-            if (child.Src is null && !options.AllowInlineActors)
+            if (child.Src is null && !invokedIds.Contains(child.Id) && !options.AllowInlineActors)
             {
                 throw new InvalidOperationException("An inline child actor cannot be persisted.");
             }
@@ -68,6 +75,7 @@ public sealed partial class StateMachine<TContext>
                 Id = child.Id,
                 Address = ActorAddress.Child(rootAddress, child.Id),
                 Src = child.Src,
+                SyncSnapshot = child.SyncSnapshot,
                 Incarnation = child.Incarnation,
                 Snapshot = childSnapshot,
                 Remote = !embed
@@ -133,10 +141,8 @@ public sealed partial class StateMachine<TContext>
             StateInputs = state.StateInputs.IsEmpty
                 ? null
                 : new Dictionary<string, object?>(state.StateInputs, StringComparer.Ordinal),
-            Machine = new PersistedMachineIdentity(Id, Version),
-            // v6 State.ts:708-713 mirrors the version at the top level only when the machine
-            // declares one; an unversioned machine writes neither field.
-            Version = Version
+            // v6 State.ts writes `machine` only when the machine declares a version.
+            Machine = Version is null ? null : new PersistedMachineIdentity(Id, Version)
         };
     }
 
@@ -161,12 +167,23 @@ public sealed partial class StateMachine<TContext>
 
         var rootAddress = options.RootAddress ?? ActorAddress.Root(Id);
 
+        // 0. Value — validated against this machine, then expanded to a full configuration. First,
+        // because an inline invoke's child resolves through the active states' invoke definitions.
+        if (snapshot.Value is null)
+        {
+            throw new InvalidSnapshotException("Persisted snapshot has an invalid state value.");
+        }
+
+        var configuration = ConfigurationOf(snapshot.Value);
+
         // 1. Children — resolved through the machine's registered sources.
         var children = new List<ChildToRestore>(snapshot.Children.Count);
         var childrenById = new Dictionary<string, ChildToRestore>(StringComparer.Ordinal);
         foreach (var persisted in snapshot.Children)
         {
-            var address = persisted.Address ?? ActorAddress.Child(rootAddress, persisted.Id);
+            var address = string.IsNullOrEmpty(persisted.Address)
+                ? ActorAddress.Child(rootAddress, persisted.Id)
+                : persisted.Address;
             var incarnation = persisted.Incarnation ?? "0";
 
             ChildToRestore restored;
@@ -174,27 +191,34 @@ public sealed partial class StateMachine<TContext>
             {
                 // v6 StateMachine.ts:1424-1431. A by-address child is re-attached, not re-created,
                 // so the source key is the only thing a host can route by.
-                if (persisted.Src is null)
+                if (persisted.Src is null || string.IsNullOrEmpty(persisted.Address))
                 {
-                    throw new InvalidOperationException(
+                    throw new InvalidSnapshotException(
                         $"Unable to restore remote child '{persisted.Id}': a child referenced by " +
-                        "address requires a registered source key.");
+                        "address requires a registered source key and an address.");
                 }
 
                 restored = new ChildToRestore(
-                    persisted.Id, persisted.Src, address, incarnation, persisted.Snapshot, null, Remote: true);
+                    persisted.Id, persisted.Src, address, incarnation, persisted.Snapshot, null, Remote: true,
+                    persisted.SyncSnapshot);
             }
             else
             {
-                if (persisted.Src is null || !Sources.TryGetValue(persisted.Src, out var logic))
+                IActorLogic? logic;
+                if (persisted.Src is null)
                 {
-                    throw new InvalidOperationException(
+                    logic = ResolveInvokedActorLogic(configuration, persisted.Id);
+                }
+                else if (!Sources.TryGetValue(persisted.Src, out logic))
+                {
+                    throw new InvalidSnapshotException(
                         $"Unable to restore child actor '{persisted.Id}': child source " +
-                        $"'{persisted.Src ?? "<unknown>"}' is not provided in {StatePath.DescribeMachine(Id)}.");
+                        $"'{persisted.Src}' is not provided in {StatePath.DescribeMachine(Id)}.");
                 }
 
                 restored = new ChildToRestore(
-                    persisted.Id, persisted.Src, address, incarnation, persisted.Snapshot, logic, Remote: false);
+                    persisted.Id, persisted.Src, address, incarnation, persisted.Snapshot, logic, Remote: false,
+                    persisted.SyncSnapshot);
             }
 
             children.Add(restored);
@@ -205,8 +229,22 @@ public sealed partial class StateMachine<TContext>
         var timers = new List<LogicalTimer>(snapshot.Timers.Count);
         foreach (var persisted in snapshot.Timers)
         {
+            if (persisted.Type is not ("@xstate.raise" or "@xstate.sendTo"))
+            {
+                throw new InvalidSnapshotException($"Persisted timer has invalid type '{persisted.Type}'.");
+            }
+
             string? target = persisted.Target;
-            if (target is not null && target != EffectTarget.Parent)
+            if (persisted.TargetActor is { } actorRef)
+            {
+                // A serialized actor-ref target resolves by address to a restored child; this
+                // port has no actor system to route any other address through.
+                target = children.FirstOrDefault(c => c.Address == actorRef.Actor)?.Id ??
+                    throw new InvalidSnapshotException(
+                        $"Unable to restore timer {TimerKey.For(persisted.Id, persisted.Seq, persisted.Event).Serialize()}: " +
+                        $"target actor '{actorRef.Actor}' is unavailable.");
+            }
+            else if (target is not null && target != EffectTarget.Parent)
             {
                 if (target == EffectTarget.Self)
                 {
@@ -214,7 +252,7 @@ public sealed partial class StateMachine<TContext>
                 }
                 else if (!childrenById.ContainsKey(target))
                 {
-                    throw new InvalidOperationException(
+                    throw new InvalidSnapshotException(
                         $"Unable to restore timer {TimerKey.For(persisted.Id, persisted.Seq, persisted.Event).Serialize()}: target actor '{target}' is unavailable.");
                 }
             }
@@ -257,10 +295,7 @@ public sealed partial class StateMachine<TContext>
             }
         }
 
-        // 4. Value — validated against this machine, then expanded to a full configuration.
-        var configuration = ConfigurationOf(snapshot.Value);
-
-        // 5. Counter folding (v6 StateMachine.ts:1590-1614). A legacy single `_nextActorId` has no
+        // 4. Counter folding (v6 StateMachine.ts:1590-1614). A legacy single `_nextActorId` has no
         // per-prefix meaning and is dropped on the way in (it is simply not part of this DTO);
         // generated-shaped child ids raise their prefix's counter to a floor, so a snapshot
         // written before per-prefix counters — or edited by hand — can never hand out a live
@@ -289,7 +324,7 @@ public sealed partial class StateMachine<TContext>
             NextActorIds = nextActorIds.ToImmutableDictionary(StringComparer.Ordinal),
             NextTimerId = snapshot.NextTimerId,
             NextIncarnation = snapshot.NextIncarnation,
-            Children = [.. children.Select(c => new ChildRecord(c.Id, c.Src, c.Incarnation))],
+            Children = [.. children.Select(c => new ChildRecord(c.Id, c.Src, c.Incarnation, c.SyncSnapshot))],
             Timers = [.. timers],
             StateInputs = snapshot.StateInputs is null
                 ? ImmutableDictionary.Create<string, object?>(StringComparer.Ordinal)
@@ -305,16 +340,8 @@ public sealed partial class StateMachine<TContext>
     /// </summary>
     private PersistedSnapshot CheckIdentity(PersistedSnapshot snapshot, RestoreOptions<TContext> options)
     {
-        var legacyVersion = snapshot.Version;
-        var nestedVersion = snapshot.Machine?.Version;
-
-        if (legacyVersion is not null && nestedVersion is not null && legacyVersion != nestedVersion)
-        {
-            throw new InvalidOperationException(
-                $"Persisted snapshot version '{legacyVersion}' conflicts with machine version '{nestedVersion}'.");
-        }
-
-        var persistedVersion = nestedVersion ?? legacyVersion;
+        PersistedSnapshotIdentity.Validate(snapshot);
+        var persistedVersion = snapshot.Machine?.Version;
 
         if (snapshot.Machine?.Id is { } persistedId && persistedId != Id)
         {
@@ -382,6 +409,28 @@ public sealed partial class StateMachine<TContext>
         return [.. nodes.OrderBy(n => n.Order).Select(n => n.Id)];
     }
 
+    /// <summary>
+    /// The logic of the one active invoke definition with id <paramref name="childId"/> — v6
+    /// <c>resolveInvokedActorLogic</c> (<c>utils.ts</c>), for a child persisted without a source key.
+    /// </summary>
+    private IActorLogic ResolveInvokedActorLogic(IReadOnlyList<string> configuration, string childId)
+    {
+        var definitions = configuration
+            .SelectMany(id => _idMap[id].Invokes)
+            .Where(invoke => invoke.Id == childId)
+            .ToList();
+
+        if (definitions.Count != 1)
+        {
+            throw new InvalidSnapshotException(
+                $"Unable to restore child actor '{childId}': it has no source key, and " +
+                $"{(definitions.Count > 0 ? "several active states" : "no active state")} of " +
+                $"{StatePath.DescribeMachine(Id)} {(definitions.Count > 0 ? "invoke" : "invokes")} it.");
+        }
+
+        return definitions[0].Logic;
+    }
+
     private void CollectValueNodes(
         object? value,
         StateNode<TContext> node,
@@ -394,7 +443,18 @@ public sealed partial class StateMachine<TContext>
             return;
         }
 
-        foreach (var (childKey, childValue) in StateValueShape.AsMap(value))
+        var entries = StateValueShape.AsMap(value).ToList();
+        var isMap = value is System.Collections.IDictionary or
+            System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Object };
+        if (!isMap || (entries.Count > 1 && node.Type is not StateNodeType.Parallel))
+        {
+            throw new InvalidSnapshotException(!isMap
+                ? "Persisted snapshot has an invalid state value."
+                : $"Persisted snapshot has multiple active children of non-parallel state " +
+                  $"'{(path.Count == 0 ? "(machine)" : string.Join('.', path))}'.");
+        }
+
+        foreach (var (childKey, childValue) in entries)
         {
             var child = ChildByKey(node, childKey) ?? throw MissingState(path, childKey);
             nodes.Add(child);
@@ -402,7 +462,7 @@ public sealed partial class StateMachine<TContext>
         }
     }
 
-    private InvalidOperationException MissingState(IReadOnlyList<string> path, string key) =>
+    private InvalidSnapshotException MissingState(IReadOnlyList<string> path, string key) =>
         new($"Persisted snapshot references state '{string.Join('.', path.Append(key))}' which does " +
             $"not exist on {StatePath.DescribeMachine(Id)}.");
 

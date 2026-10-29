@@ -50,3 +50,14 @@ public static class ActorAddress
             ? AnonymousRoot
             : EncodeSegment(machineId);
 }
+
+/// <summary>
+/// An actor reference reduced to its durable identity — xstate v6 <c>SerializedActorRef</c>,
+/// written as <c>{ "$actor": address, "incarnation"?: … }</c>. It is how an actor ref inside a
+/// persisted <c>context</c> (or a timer target) crosses a process boundary;
+/// <see cref="Persistence.SnapshotJson"/> reads any such object back as this record.
+/// </summary>
+/// <param name="Actor">The actor's <see cref="ActorAddress"/>.</param>
+/// <param name="Incarnation">Host-supplied incarnation token, when the ref names one.</param>
+[System.Text.Json.Serialization.JsonConverter(typeof(Persistence.SerializedActorRefConverter))]
+public sealed record SerializedActorRef(string Actor, string? Incarnation = null);

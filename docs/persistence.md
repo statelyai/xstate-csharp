@@ -79,9 +79,61 @@ Assert.Equal(4, restored.State.NextActorIds["worker"]);
 
 ## JSON
 
-`SnapshotJson.DefaultOptions()` gives `System.Text.Json` options that round-trip a
-`PersistedSnapshot`. Two things in a snapshot are not plain JSON on their own, and this is what
-handles them.
+`SnapshotJson.Serialize` and `SnapshotJson.Deserialize` write and read a `PersistedSnapshot` as
+xstate v6's `persisted-snapshot/v1` envelope (`persistedSnapshot.schema.json`), so a snapshot this
+port writes validates against the upstream schema and an upstream snapshot reads back here.
+`SnapshotJson.DefaultOptions()` gives the underlying `System.Text.Json` options.
+
+```json
+{
+  "status": "active",
+  "value": { "shop": "cart" },
+  "context": { "count": 1, "peer": { "$actor": "job/w" } },
+  "historyValue": { "job.shop.hist": [{ "id": "job.shop.cart" }] },
+  "stateInputs": { "job.shop": { "n": 2 } },
+  "children": {
+    "w": {
+      "address": "job/w",
+      "src": "worker",
+      "syncSnapshot": true,
+      "snapshot": { "status": "active", "value": "busy", "context": null, "historyValue": {}, "children": {}, "timers": [], "_nextActorIds": {}, "_nextTimerId": 0, "_nextIncarnation": 0 },
+      "_incarnation": "0"
+    },
+    "r": { "address": "job/r", "src": "remote", "remote": true, "incarnation": "1" }
+  },
+  "timers": [
+    { "seq": 0, "delay": 500, "type": "@xstate.sendTo", "event": { "type": "ping", "$event": "NamedEvent", "Name": "ping", "Data": null }, "target": { "type": "parent" }, "scheduledAt": 1234 },
+    { "delay": 5000, "type": "@xstate.raise", "event": { "type": "xstate.after", "$event": "AfterEvent", "Delay": "5000", "StateId": "job.shop" }, "target": "self" }
+  ],
+  "machine": { "id": "job", "version": "1.0.0" },
+  "_nextActorIds": { "x": 1 },
+  "_nextTimerId": 1,
+  "_nextIncarnation": 2
+}
+```
+
+- `children` is keyed by child id. An embedded child carries `snapshot`; a by-address child
+  carries `remote: true` and no snapshot. An inline invoke omits `src` and restores through the
+  active invoke definition with that id; zero or several matching invokes is an error.
+- `timers` is in scheduling order. `target` is `"self"`, a child id, `{ "type": "parent" }`, or a
+  serialized actor ref `{ "$actor": address }` resolved to the restored child at that address.
+- `machine` is written only when the machine declares a version; when present it needs both keys.
+- `stateInputs`, `output` and `error` are omitted when empty.
+- A `SerializedActorRef` in `context` writes as `{ "$actor": address }` and reads back as a
+  `SerializedActorRef`; the port has no live actor refs to rebind it to. A circular context throws.
+- Unknown fields on the envelope, children and timers are ignored. Malformed JSON, or JSON of the
+  wrong shape, throws `InvalidSnapshotException`.
+
+Port extensions, all legal under the schema:
+
+- `_incarnation` on an embedded child: this port's incarnation token is deterministic, so it is
+  durable data. v6 writes a public `incarnation` only for remote children, and so does this port.
+- A string timer target other than `self` or a child id (for example `#_registry:key`) is written
+  verbatim; v6 has no counterpart.
+- `scheduledAt` is host-supplied: the pure core never sets it, only carries it through.
+- Events carry a `$event` CLR type discriminator next to `type`; see below.
+
+Two things in a snapshot are not plain JSON on their own, and these options handle them.
 
 `MachineEvent` is a polymorphic hierarchy, so an event is written with a `$event` discriminator
 carrying its CLR type name alongside the `type` the machine matches on. Pass your own event types
@@ -128,8 +180,7 @@ var restored = current.Restore(persisted, new RestoreOptions<Unit>
 {
     Migrate = (snapshot, from) => snapshot with
     {
-        Machine = new PersistedMachineIdentity("job", "2.0.0"),
-        Version = "2.0.0"
+        Machine = new PersistedMachineIdentity("job", "2.0.0")
     }
 });
 ```
@@ -146,8 +197,7 @@ Assert.Equal(new PersistedMachineIdentity("cart", "2.0.0"), parsed.Identity);
 Assert.Same(V2, parsed.Machine);
 ```
 
-Identity comes from the nested `Machine` first, then the legacy top-level `Version`, then the
-`unversioned` fallback configured at registration — the version that was live before versioning
+Identity comes from `Machine` first, then the `unversioned` fallback configured at registration — the version that was live before versioning
 existed. Every registered machine must declare a version, share one id, and be registered once.
 
 `MigrateSnapshot` brings a snapshot to a target version. An exact migration handles its own source
@@ -176,7 +226,8 @@ state.
 
 Restoring is a *pure* API, and it refuses rather than guesses. Unlike v6 — which swallows restore
 errors and reports a failed actor — every one of these surfaces as an
-`InvalidOperationException` at the call site, where the host can decide what to do with a snapshot
+`InvalidOperationException` at the call site — an `InvalidSnapshotException` (v6
+`InvalidSnapshotError`) when the snapshot itself is malformed, where the host can decide what to do with a snapshot
 it cannot use. One exception is different: without a `ContextConverter`, `Restore` casts
 `snapshot.Context` straight to `TContext`, and a context that came through a serializer (a
 `JsonElement`, a dictionary) fails that cast with an `InvalidCastException`. Pass a
@@ -188,7 +239,9 @@ it cannot use. One exception is different: without a `ContextConverter`, `Restor
 | `Child 'w' has no persisted snapshot.` | Embedding was on and `ChildSnapshot` returned nothing. |
 | `Machine ID mismatch: …` | The snapshot names a different machine. |
 | `Persisted snapshot version 'x' does not match machine version 'y' …` | No `Migrate` was supplied. |
-| `Persisted snapshot version 'x' conflicts with machine version 'y'.` | The nested and legacy versions on one snapshot disagree. |
+| `Persisted snapshot has an invalid 'machine' …` | `machine` lacks `id` or `version`. |
+| `Persisted snapshot has multiple active children …` | A non-parallel state has more than one active child in `value`. |
+| `Unable to restore child actor 'w': it has no source key, and …` | An inline child with zero or several active invokes of that id. |
 | `Persisted snapshot references state 's' which does not exist …` | The state value names a state this machine no longer has. |
 | `Unable to restore child actor 'w': child source '…' is not provided …` | The source key is not registered on this machine. |
 | `Unable to restore timer 't': target actor 'ghost' is unavailable.` | A delayed send aimed at a child the snapshot no longer holds. |

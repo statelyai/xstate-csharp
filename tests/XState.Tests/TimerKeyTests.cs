@@ -112,7 +112,7 @@ public class TimerKeyTests
         };
 
         var json = JsonSerializer.Serialize(persisted, options);
-        Assert.Contains("\"Timers\":[", json);
+        Assert.Contains("\"timers\":[", json);
 
         var restored = machine.Restore(
             JsonSerializer.Deserialize<PersistedSnapshot>(json, options)!,
@@ -129,15 +129,13 @@ public class TimerKeyTests
     {
         var options = SnapshotJson.DefaultOptions();
         var json = JsonSerializer.Serialize(TwoTimers().Persist(TwoTimers().GetInitialState().State), options);
-        var start = json.IndexOf("\"Timers\":[", StringComparison.Ordinal);
-        var end = json.IndexOf("],\"HistoryValue\"", start, StringComparison.Ordinal);
-        Assert.True(start >= 0 && end > start);
+        var node = System.Text.Json.Nodes.JsonNode.Parse(json)!;
 
         // The pre-alpha.68 shape: an object keyed by timer id.
-        var old = json[..start] + "\"Timers\":{\"first\":" + json[(start + 10)..end].Split("},{")[0] + "}}" +
-                  json[(end + 1)..];
+        node["timers"] = new System.Text.Json.Nodes.JsonObject { ["first"] = node["timers"]![0]!.DeepClone() };
+        var old = node.ToJsonString();
 
-        var error = Assert.Throws<InvalidOperationException>(
+        var error = Assert.Throws<InvalidSnapshotException>(
             () => JsonSerializer.Deserialize<PersistedSnapshot>(old, options));
         Assert.Contains("keyed by timer id", error.Message);
     }

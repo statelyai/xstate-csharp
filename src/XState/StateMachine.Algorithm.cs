@@ -647,7 +647,7 @@ public sealed partial class StateMachine<TContext>
                 var stamped = spawn with { Incarnation = incarnation };
                 effect = stamped;
 
-                run.Children.Add(new ChildRecord(stamped.Id, stamped.Src, incarnation));
+                run.Children.Add(new ChildRecord(stamped.Id, stamped.Src, incarnation, stamped.SyncSnapshot));
                 run.DeferredStarts.Add(stamped.Id);
                 break;
 

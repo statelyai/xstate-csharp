@@ -55,7 +55,11 @@ public sealed record LogicalTimer(
 /// done/error event it relays, so a completion from a previous incarnation of the same id can be
 /// told apart from this one's.
 /// </param>
-public sealed record ChildRecord(string Id, string? Src, string Incarnation);
+/// <param name="SyncSnapshot">
+/// Whether the parent observes this child's snapshots (<see cref="SpawnEffect.SyncSnapshot"/>);
+/// persisted as v6 <c>syncSnapshot</c>.
+/// </param>
+public sealed record ChildRecord(string Id, string? Src, string Incarnation, bool SyncSnapshot = false);
 
 /// <summary>
 /// An immutable machine snapshot: configuration + context + status, plus the durable ledgers

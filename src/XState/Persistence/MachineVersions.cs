@@ -105,28 +105,18 @@ public sealed class MachineVersions
     /// <summary>
     /// Resolves which registered version wrote <paramref name="snapshot"/> — v6
     /// <c>machineVersions.ts</c>:361-419. Identity comes from the nested
-    /// <see cref="PersistedSnapshot.Machine"/>, else the legacy top-level
-    /// <see cref="PersistedSnapshot.Version"/>, else the configured <c>unversioned</c> fallback.
-    /// <para>
-    /// Deviation from v6, which treats a nested <c>machine</c> without a string <c>version</c> as
-    /// an invalid identity: this port's <see cref="StateMachine{TContext}.Persist"/> always writes
-    /// the nested identity (v6 omits it entirely for an unversioned machine), so a null nested
-    /// version falls through to the same resolution chain rather than failing.
-    /// </para>
+    /// <see cref="PersistedSnapshot.Machine"/>, else the configured <c>unversioned</c> fallback.
+    /// A <c>machine</c> without both <c>id</c> and <c>version</c> is an
+    /// <see cref="InvalidSnapshotException"/>, as in v6.
     /// </summary>
     public ParsedSnapshot ParseSnapshot(PersistedSnapshot snapshot)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
 
+        PersistedSnapshotIdentity.Validate(snapshot);
         var id = snapshot.Machine?.Id ?? MachineId;
-        var version = snapshot.Machine?.Version ?? snapshot.Version ?? _unversioned ??
+        var version = snapshot.Machine?.Version ?? _unversioned ??
             throw new InvalidOperationException("Persisted snapshot is missing machine identity.");
-
-        if (snapshot.Version is { } legacy && legacy != version)
-        {
-            throw new InvalidOperationException(
-                $"Persisted snapshot version '{legacy}' conflicts with machine version '{version}'.");
-        }
 
         if (id != MachineId || !_byVersion.TryGetValue(version, out var machine))
         {
@@ -149,7 +139,7 @@ public sealed class MachineVersions
             throw new InvalidOperationException("Persisted snapshot is missing machine identity.");
         }
 
-        return ParseSnapshot(raw.Deserialize<PersistedSnapshot>(options ?? SnapshotJson.DefaultOptions())!);
+        return ParseSnapshot(SnapshotJson.Deserialize(raw.GetRawText(), options));
     }
 
     /// <summary>
@@ -263,7 +253,20 @@ public sealed class MachineVersions
     private static PersistedSnapshot Finalize(PersistedSnapshot snapshot, IMachineLogic target) =>
         snapshot with
         {
-            Machine = new PersistedMachineIdentity(target.Id, target.Version),
-            Version = target.Version
+            Machine = target.Version is null ? null : new PersistedMachineIdentity(target.Id, target.Version)
         };
+}
+
+/// <summary>The <c>machine</c> shape check shared by restore and <see cref="MachineVersions"/>.</summary>
+internal static class PersistedSnapshotIdentity
+{
+    /// <summary>v6 schema: a persisted <c>machine</c> requires both <c>id</c> and <c>version</c>.</summary>
+    public static void Validate(PersistedSnapshot snapshot)
+    {
+        if (snapshot.Machine is { } machine && (machine.Id is null || machine.Version is null))
+        {
+            throw new InvalidSnapshotException(
+                "Persisted snapshot has an invalid 'machine': it requires both 'id' and 'version'.");
+        }
+    }
 }

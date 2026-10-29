@@ -131,15 +131,12 @@ public class PersistenceTests
     // --- Inline actors ---
 
     [Fact]
-    public void An_inline_child_cannot_be_persisted_unless_the_caller_insists()
+    public void An_inline_spawned_child_cannot_be_persisted_unless_the_caller_insists()
     {
-        var machine = Machine.Create("job")
-            .Initial("running")
-            .State("running", s => s.Invoke(Worker(), "w"))
-            .Build();
+        var machine = Machine.Create("job").Initial("running").State("running").Build();
 
-        var state = machine.GetInitialState().State;
-        Assert.Null(Assert.Single(state.Children).Src);
+        // A child no active state invokes: only a source key could name its logic.
+        var state = machine.GetInitialState().State with { Children = [new ChildRecord("s", null, "0")] };
 
         var error = Assert.Throws<InvalidOperationException>(() => machine.Persist(state));
         Assert.Equal("An inline child actor cannot be persisted.", error.Message);
@@ -150,10 +147,62 @@ public class PersistenceTests
         Assert.Null(Assert.Single(persisted.Children).Src);
 
         // …and the snapshot it produces is exactly the one that cannot be restored.
-        var restoreError = Assert.Throws<InvalidOperationException>(() => machine.Restore(persisted));
+        var restoreError = Assert.Throws<InvalidSnapshotException>(() => machine.Restore(persisted));
         Assert.Equal(
-            "Unable to restore child actor 'w': child source '<unknown>' is not provided in machine 'job'.",
+            "Unable to restore child actor 's': it has no source key, and no active state of machine 'job' invokes it.",
             restoreError.Message);
+    }
+
+    [Fact]
+    public void An_inline_invoke_persists_without_src_and_restores_through_its_invoke_definition()
+    {
+        var worker = Worker();
+        var machine = Machine.Create("job")
+            .Initial("running")
+            .State("running", s => s.Invoke(worker, "w"))
+            .Build();
+
+        var persisted = machine.Persist(
+            machine.GetInitialState().State,
+            new PersistOptions { ChildSnapshot = _ => Persist(worker) });
+        Assert.Null(Assert.Single(persisted.Children).Src);
+
+        var json = SnapshotJson.Serialize(persisted);
+        Assert.DoesNotContain("\"src\"", json);
+
+        var restored = machine.Restore(SnapshotJson.Deserialize(json), new RestoreOptions<Unit> { ContextConverter = _ => Unit.Value });
+        Assert.Same(worker, Assert.Single(restored.Children).Logic);
+    }
+
+    [Fact]
+    public void An_inline_child_restores_only_when_exactly_one_active_state_invokes_it()
+    {
+        var machine = Machine.Create("job")
+            .Initial("p")
+            .Parallel("p", p => p
+                .State("a", s => s.Invoke(Worker(), "w"))
+                .State("b", s => s.Invoke(Worker(), "w")))
+            .State("idle")
+            .Build();
+
+        PersistedSnapshot Snapshot(object value) => new()
+        {
+            Status = PersistedStatus.Active,
+            Value = value,
+            Context = Unit.Value,
+            Children = [new PersistedChild { Id = "w", Address = "job/w", Snapshot = Persist(Worker()) }]
+        };
+
+        var none = Assert.Throws<InvalidSnapshotException>(() => machine.Restore(Snapshot("idle")));
+        Assert.Equal(
+            "Unable to restore child actor 'w': it has no source key, and no active state of machine 'job' invokes it.",
+            none.Message);
+
+        var several = Assert.Throws<InvalidSnapshotException>(() => machine.Restore(Snapshot(
+            new Dictionary<string, object?> { ["p"] = new Dictionary<string, object?> { ["a"] = new Dictionary<string, object?>(), ["b"] = new Dictionary<string, object?>() } })));
+        Assert.Equal(
+            "Unable to restore child actor 'w': it has no source key, and several active states of machine 'job' invoke it.",
+            several.Message);
     }
 
     [Fact]
@@ -218,8 +267,7 @@ public class PersistenceTests
                 seen = from;
                 return snapshot with
                 {
-                    Machine = new PersistedMachineIdentity("job", "2.0.0"),
-                    Version = "2.0.0"
+                    Machine = new PersistedMachineIdentity("job", "2.0.0")
                 };
             }
         });
@@ -229,17 +277,13 @@ public class PersistenceTests
     }
 
     [Fact]
-    public void A_snapshot_whose_two_recorded_versions_disagree_is_refused()
+    public void A_machine_identity_without_a_version_is_an_invalid_snapshot()
     {
         var machine = Job(Worker());
         var persisted = machine.Persist(machine.GetInitialState().State, new PersistOptions { EmbedChildren = false });
 
-        var error = Assert.Throws<InvalidOperationException>(
-            () => machine.Restore(persisted with { Version = "0.9.0" }));
-
-        Assert.Equal(
-            "Persisted snapshot version '0.9.0' conflicts with machine version '1.0.0'.",
-            error.Message);
+        Assert.Throws<InvalidSnapshotException>(
+            () => machine.Restore(persisted with { Machine = new PersistedMachineIdentity("job") }));
     }
 
     [Fact]
@@ -248,7 +292,7 @@ public class PersistenceTests
         var machine = Job(Worker());
         var persisted = machine.Persist(machine.GetInitialState().State, new PersistOptions { EmbedChildren = false });
 
-        var error = Assert.Throws<InvalidOperationException>(
+        var error = Assert.Throws<InvalidSnapshotException>(
             () => machine.Restore(persisted with { Value = "gone" }));
 
         Assert.Equal(
@@ -263,7 +307,7 @@ public class PersistenceTests
         var persisted = machine.Persist(machine.GetInitialState().State, new PersistOptions { EmbedChildren = false });
 
         var stray = Assert.Single(persisted.Timers) with { Target = "ghost" };
-        var error = Assert.Throws<InvalidOperationException>(() => machine.Restore(persisted with
+        var error = Assert.Throws<InvalidSnapshotException>(() => machine.Restore(persisted with
         {
             Timers = [stray]
         }));
