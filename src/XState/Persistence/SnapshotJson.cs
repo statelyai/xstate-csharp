@@ -40,8 +40,8 @@ public static class SnapshotJson
             return JsonSerializer.Deserialize<PersistedSnapshot>(json, options ?? DefaultOptions())
                    ?? throw new InvalidSnapshotException("Persisted snapshot cannot be null.");
         }
-        catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException
-                                  and not InvalidSnapshotException)
+        catch (Exception e) when (e is not InvalidSnapshotException
+                                  && e is JsonException or InvalidOperationException or FormatException)
         {
             throw new InvalidSnapshotException($"Persisted snapshot is malformed: {e.Message}", e);
         }
