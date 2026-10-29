@@ -33,19 +33,25 @@ local behaviour.
 ```csharp
 public sealed class JournalingHost : IDurableHost
 {
-    public ValueTask ScheduleTimer(DurableEffect effect, string id, TimeSpan delay)
+    public ValueTask ScheduleTimer(DurableEffect effect, TimerKey key, TimeSpan delay)
     {
-        // Timer ids are per actor: key the alarm by the owning actor's address as well, and
-        // deliver the firing to that actor's mailbox.
+        // Timer keys are per actor: key the alarm by the owning actor's address as well, and
+        // deliver the firing to that actor's mailbox. Scheduling a key that is already armed
+        // replaces it (the machine reschedules in place, without a cancel).
         var cts = new CancellationTokenSource();
-        _timers[(effect.Source, id)] = cts;
+        if (_timers.Remove((effect.Source, key.Serialize()), out var previous))
+        {
+            previous.Cancel();
+        }
+
+        _timers[(effect.Source, key.Serialize())] = cts;
 
         _ = Task.Delay(delay, cts.Token).ContinueWith(
             task =>
             {
                 if (task.IsCompletedSuccessfully)
                 {
-                    MailboxOf(effect.Source).Writer.TryWrite(new TimerEvent(id));
+                    MailboxOf(effect.Source).Writer.TryWrite(new TimerEvent(key));
                 }
             },
             TaskScheduler.Default);
@@ -125,15 +131,19 @@ A host that does not track incarnations passes `null`, and the event is accepted
 ## Timers
 
 A delay is never a `Task.Delay` inside the machine. It is a **logical timer**: an entry on
-`State<TContext>.Timers` with a deterministic id, a declared delay, a kind (`Raise` or `SendTo`)
-and an event. The host owns only the clock.
+`State<TContext>.Timers` (in scheduling order) with a `TimerKey`, a declared delay, a kind (`Raise`
+or `SendTo`) and an event. The host owns only the clock.
 
-`ScheduleTimer(effect, id, delay)` is the whole scheduling contract; `effect.Source` is the owning actor's address. When the delay
-elapses, the host sends the owning actor `new TimerEvent(id)` — that is all it says. The machine
-looks the id up on its own ledger and decides what firing means:
+A `TimerKey` is the timer's explicit id (`TimerKey.ById`), else — for an id-less delayed
+raise/send — the actor's timer sequence number (`TimerKey.BySeq`), else — for built-in `after` and
+`timeout` timers — its event (`TimerKey.ByEvent`). No ids are generated.
 
-- A live id releases the timer's event and removes the entry.
-- An id no longer on the ledger is a stale firing. It produces no effects and no state change.
+`ScheduleTimer(effect, key, delay)` is the whole scheduling contract; `effect.Source` is the owning
+actor's address. When the delay elapses, the host sends the owning actor `new TimerEvent(key)` —
+that is all it says. The machine looks the key up on its own ledger and decides what firing means:
+
+- A live key releases the timer's event and removes the entry.
+- A key no longer on the ledger is a stale firing. It produces no effects and no state change.
   Cancellation always races firing, so this case is normal, not exceptional.
 
 A delayed send is a timer on the **sender**, not the target: the sender owns the ledger entry and
@@ -142,14 +152,19 @@ is the only actor that can cancel it. When the timer fires, the delayed send bec
 
 `ScheduleTimer` and `CancelTimer` receive the originating `DurableEffect` (the delayed
 `RaiseEffect`/`SendToEffect`, or the `CancelEffect`) so a journal can key them by effect id like
-every other operation. Key the host-side alarm itself by `(effect.Source, id)`, which is stable
-across replays.
+every other operation. Key the host-side alarm itself by `(effect.Source, key.Serialize())`, which
+is stable across replays. Rescheduling a pending key replaces that timer in place and emits no
+`CancelEffect`, so `ScheduleTimer` must replace an alarm already armed under the same key.
+`CancelTimer` receives the `CancelEffect`; cancel the alarm under `cancel.Key`.
 
-The snapshot deliberately records no deadline or remaining time. Persist the deadline yourself when
-you accept `ScheduleTimer`, and hand it back on restore:
-`RearmTimers(restored.Timers, remainingDelay: t => dueAt[t.Id] - now)` re-arms each timer with what
-is left (clamped at zero). Without a `remainingDelay`, a timer restarts from its full declared
-delay on every restore, so a worker that crashes repeatedly would postpone it indefinitely.
+The core never records a deadline. Persist it yourself when you accept `ScheduleTimer` — either in
+your own store, or as `PersistedTimer.ScheduledAt` (Unix ms start), which restore carries through
+to `LogicalTimer.ScheduledAt` — and hand it back on restore:
+`RearmTimers(restored.Timers, remainingDelay: t => dueAt[t.Key.Serialize()] - now)` re-arms each
+timer with what is left (clamped at zero). Without a `remainingDelay`, a timer carrying
+`ScheduledAt` re-arms with `ScheduledAt + Delay - now`; any other timer restarts from its full
+declared delay on every restore, so a worker that crashes repeatedly would postpone it
+indefinitely.
 
 ## The effect contract
 

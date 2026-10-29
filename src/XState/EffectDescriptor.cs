@@ -79,7 +79,11 @@ public sealed record EffectDescriptor(
                 Delay = e.Delay
             },
 
-            CancelEffect e => Empty(e) with { Source = sourceAddress, Id = e.SendId },
+            CancelEffect e => Empty(e) with
+            {
+                Source = sourceAddress,
+                Id = e.Key is TimerKey.ById byId ? byId.Id : e.Key.Serialize()
+            },
 
             StopChildEffect e => Empty(e) with
             {

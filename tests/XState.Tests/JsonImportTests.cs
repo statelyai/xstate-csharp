@@ -786,6 +786,43 @@ public class JsonImportTests
     }
 
     [Fact]
+    public void Cancel_accepts_a_seq_or_a_built_in_timer_event()
+    {
+        var machine = MachineConfig.FromJson(
+            """
+            {
+              "id": "keys",
+              "initial": "a",
+              "states": {
+                "a": {
+                  "entry": [{ "type": "@xstate.raise", "event": { "type": "LATE" }, "delay": 500 }],
+                  "after": { "1000": "b" },
+                  "on": {
+                    "BY_SEQ": { "actions": [{ "type": "@xstate.cancel", "seq": 0 }] },
+                    "BY_EVENT": {
+                      "actions": [{
+                        "type": "@xstate.cancel",
+                        "event": { "type": "xstate.after", "delay": 1000, "stateId": "keys.a" }
+                      }]
+                    }
+                  }
+                },
+                "b": {}
+              }
+            }
+            """);
+
+        var initial = machine.GetInitialState();
+        Assert.Equal(2, initial.State.Timers.Count);
+
+        var bySeq = machine.Transition(initial.State, Ev("BY_SEQ"));
+        Assert.IsType<AfterEvent>(Assert.Single(bySeq.State.Timers).Event);
+
+        var byEvent = machine.Transition(bySeq.State, Ev("BY_EVENT"));
+        Assert.Empty(byEvent.State.Timers);
+    }
+
+    [Fact]
     public void The_built_in_raise_action_honours_a_delay_and_an_id_that_cancel_can_name()
     {
         var machine = MachineConfig.FromJson(
@@ -817,7 +854,7 @@ public class JsonImportTests
         Assert.Equal("LATE", raise.Event.Type);
 
         var disarmed = machine.Transition(armed.State, Ev("DISARM"));
-        Assert.Equal("armed", Assert.Single(disarmed.Effects.OfType<CancelEffect>()).SendId);
+        Assert.Equal("armed", ((TimerKey.ById)Assert.Single(disarmed.Effects.OfType<CancelEffect>()).Key).Id);
     }
 
     [Fact]

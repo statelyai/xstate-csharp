@@ -33,15 +33,19 @@ public interface IDurableHost
 
     /// <summary>
     /// Arms a timer on the actor at <see cref="DurableEffect.Source"/>. When it elapses the host
-    /// sends that actor <see cref="TimerEvent"/> with <paramref name="id"/>; the machine decides
-    /// what firing means, and ignores an id it no longer holds. The originating effect (a
+    /// sends that actor <see cref="TimerEvent"/> with <paramref name="key"/>; the machine decides
+    /// what firing means, and ignores a key it no longer holds. Hosts key their schedule by
+    /// (<see cref="DurableEffect.Source"/>, <see cref="TimerKey.Serialize"/>): scheduling an
+    /// already-armed key replaces it. The originating effect (a
     /// <see cref="RaiseEffect"/> or a delayed <see cref="SendToEffect"/>) is passed so the host can
     /// journal the operation under <see cref="DurableEffect.Id"/> like every other one.
     /// </summary>
-    ValueTask ScheduleTimer(DurableEffect effect, string id, TimeSpan delay) =>
+    ValueTask ScheduleTimer(DurableEffect effect, TimerKey key, TimeSpan delay) =>
         throw Unsupported(nameof(ScheduleTimer));
 
-    /// <summary>Cancels a timer armed by <see cref="ScheduleTimer"/>.</summary>
+    /// <summary>
+    /// Cancels the timer armed by <see cref="ScheduleTimer"/> under <see cref="CancelEffect.Key"/>.
+    /// </summary>
     ValueTask CancelTimer(DurableEffect effect, CancelEffect cancel) => throw Unsupported(nameof(CancelTimer));
 
     /// <summary>

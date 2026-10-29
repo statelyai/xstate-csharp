@@ -716,10 +716,8 @@ internal sealed class JsonMachineReader<TContext>
 
             case "@xstate.cancel":
             {
-                var id = JsonConfig.GetString(element, "id")
-                         ?? throw new InvalidOperationException(
-                             $"'@xstate.cancel' at {path} in machine '{_machineId}' requires an 'id'.");
-                return new CancelAction<TContext>(_ => id) { Name = type };
+                var key = ReadCancelKey(element, path);
+                return new CancelAction<TContext>(_ => key) { Name = type };
             }
 
             case "@xstate.log":
@@ -776,6 +774,46 @@ internal sealed class JsonMachineReader<TContext>
 
         return new AssignAction<TContext>(args =>
             (TContext)(object)JsonConfig.Merge((JsonElement)(object)args.Context!, patch));
+    }
+
+    /// <summary>
+    /// The <see cref="TimerKey"/> of an <c>@xstate.cancel</c>: <c>id</c>, <c>seq</c> or
+    /// <c>event</c> (v6 <c>readTimerKey</c>). A built-in timer event is read as its typed event
+    /// so it matches the <c>after</c>/<c>timeout</c> timer it names.
+    /// </summary>
+    private TimerKey ReadCancelKey(JsonElement element, string path)
+    {
+        if (JsonConfig.GetString(element, "id") is { } id)
+        {
+            return new TimerKey.ById(id);
+        }
+
+        if (JsonConfig.TryProp(element, "seq", out var seq) && seq.ValueKind is JsonValueKind.Number)
+        {
+            return new TimerKey.BySeq(seq.GetInt32());
+        }
+
+        if (JsonConfig.TryProp(element, "event", out _))
+        {
+            var evt = ReadEvent(element, $"{path}.event");
+            var data = ((NamedEvent)evt).Data is JsonElement d ? d : default;
+            string? Field(string name) => data.ValueKind is JsonValueKind.Object &&
+                                          data.TryGetProperty(name, out var v)
+                ? v.ValueKind is JsonValueKind.String ? v.GetString() : v.GetRawText()
+                : null;
+
+            return new TimerKey.ByEvent(evt.Type switch
+            {
+                "xstate.after" when Field("stateId") is { } s && Field("delay") is { } delay =>
+                    new AfterEvent(delay, s),
+                "xstate.timeout.state" when Field("stateId") is { } s => new TimeoutEvent(s),
+                "xstate.timeout.actor" when Field("actorId") is { } a => new ActorTimeoutEvent(a),
+                _ => evt
+            });
+        }
+
+        throw new InvalidOperationException(
+            $"'@xstate.cancel' at {path} in machine '{_machineId}' requires an 'id', 'seq' or 'event'.");
     }
 
     private MachineEvent ReadEvent(JsonElement owner, string path)

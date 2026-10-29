@@ -85,7 +85,7 @@ public class RegressionTests
             .Build();
 
         var initial = machine.GetInitialState();
-        var timerId = Assert.Single(initial.Effects.OfType<RaiseEffect>()).Id;
+        var timerKey = Assert.Single(initial.State.Timers).Key;
 
         // stateUtils.ts `macrostep`: the error path clones the *incoming* snapshot with status
         // `error` and emits nothing but the termination effect — it exits no states and releases
@@ -103,7 +103,7 @@ public class RegressionTests
 
         // The ledgers the host reconciles against survive on the failed snapshot.
         Assert.Equal("kid", Assert.Single(fatal.State.Children).Id);
-        Assert.True(fatal.State.Timers.ContainsKey(timerId!));
+        Assert.Contains(fatal.State.Timers, t => t.Key == timerKey);
     }
 
     // --- 3. A nested parallel region's done data survives completion in an earlier macrostep ---
@@ -183,14 +183,15 @@ public class RegressionTests
         var initial = machine.GetInitialState();
         var scheduled = Assert.Single(initial.Effects.OfType<RaiseEffect>());
 
-        Assert.NotNull(scheduled.Id);
-        // xstate v6 `scheduleTimer` (transitionActions.ts): `xstate.timer.auto.{n}`.
-        Assert.Equal("xstate.timer.auto.0", scheduled.Id);
+        // xstate v6 `updateLogicalTimers` (transitionActions.ts): no generated id, the actor's
+        // timer sequence number instead.
+        Assert.Null(scheduled.Id);
+        Assert.Equal(0, scheduled.Seq);
 
         var done = machine.Transition(initial.State, new Go());
 
         Assert.Equal(SnapshotStatus.Done, done.State.Status);
-        Assert.Contains(done.Effects, e => e is CancelEffect cancel && cancel.SendId == scheduled.Id);
+        Assert.Contains(done.Effects, e => e is CancelEffect cancel && cancel.Key == new TimerKey.BySeq(0));
     }
 
     // --- 5. A fired timer is struck off the ledger by the machine itself ---
@@ -225,7 +226,7 @@ public class RegressionTests
         // Five sends fired and only the newest is still outstanding — the ledger must not have
         // accumulated the five delivered ids.
         var cancels = machine.Stop(snapshot).Effects.OfType<CancelEffect>().ToList();
-        Assert.Equal(["send-5"], cancels.Select(c => c.SendId));
+        Assert.Equal([new TimerKey.ById("send-5")], cancels.Select(c => c.Key));
     }
 
     // --- 6. Duplicate spawn ids throw; duplicate delayed-send ids replace ---
@@ -256,14 +257,15 @@ public class RegressionTests
         Assert.Single(initial.Effects.OfType<RaiseEffect>());
 
         var again = rescheduling.Transition(initial.State, new Go());
-        var cancelIndex = again.Effects.IndexOf(again.Effects.OfType<CancelEffect>().Single());
-        var sendIndex = again.Effects.IndexOf(again.Effects.OfType<RaiseEffect>().Single());
 
-        Assert.True(cancelIndex < sendIndex, "the outstanding timer must be cancelled before it is rescheduled");
+        // xstate v6 `updateLogicalTimers`: rescheduling a pending key replaces it in place, with
+        // no cancel — the host re-keys its schedule.
+        Assert.Empty(again.Effects.OfType<CancelEffect>());
+        Assert.Single(again.Effects.OfType<RaiseEffect>());
 
         // One ledger entry, not two: stopping cancels "tick" exactly once.
         var cancels = rescheduling.Stop(again.State).Effects.OfType<CancelEffect>().ToList();
-        Assert.Equal(["tick"], cancels.Select(c => c.SendId));
+        Assert.Equal([new TimerKey.ById("tick")], cancels.Select(c => c.Key));
     }
 
     // --- 7. Targeting a history state whose recorded configuration is still active is a no-op ---

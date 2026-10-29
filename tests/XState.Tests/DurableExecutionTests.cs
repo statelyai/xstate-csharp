@@ -108,12 +108,12 @@ public class DurableExecutionTests
                 "0:1 start w",
                 // Leaving `running` retires the child; entering `waiting` arms its `after` timer.
                 "1:0 stop w",
-                "schedule xstate.after.1000.job.waiting",
+                "schedule [\"event\",{\"type\":\"xstate.after\",\"delay\":\"1000\",\"stateId\":\"job.waiting\"}]",
                 // Nothing else is outstanding, so the loop parks and the clock advances.
                 "wait event:1",
                 // Firing the timer leaves `waiting`, which cancels the timer the machine still
                 // holds on its ledger, and enters the final state.
-                "cancel xstate.after.1000.job.waiting",
+                "cancel [\"event\",{\"type\":\"xstate.after\",\"delay\":\"1000\",\"stateId\":\"job.waiting\"}]",
                 "2:1 terminate Done"
             ],
             host.Journal);
@@ -175,7 +175,7 @@ public class DurableExecutionTests
         var execution = new DurableExecution<Unit>(Job(Worker()), host);
         var (state, _) = execution.InitialTransition();
 
-        var (next, effects) = execution.Transition(state, new TimerEvent("xstate.timer.auto.99"));
+        var (next, effects) = execution.Transition(state, new TimerEvent(new TimerKey.BySeq(99)));
 
         Assert.Same(state, next);
         Assert.Empty(effects);
@@ -264,7 +264,7 @@ public class DurableExecutionTests
         private readonly Dictionary<string, (IActorLogic Logic, object? Input, string Incarnation)> _children =
             new(StringComparer.Ordinal);
 
-        private readonly List<(TimeSpan Due, string Id)> _timers = [];
+        private readonly List<(TimeSpan Due, TimerKey Key)> _timers = [];
         private TimeSpan _now;
 
         public DurableExecution<Unit>? Execution { get; set; }
@@ -308,18 +308,19 @@ public class DurableExecutionTests
             return default;
         }
 
-        public ValueTask ScheduleTimer(DurableEffect effect, string id, TimeSpan delay)
+        public ValueTask ScheduleTimer(DurableEffect effect, TimerKey key, TimeSpan delay)
         {
-            Journal.Add($"schedule {id}");
-            _timers.Add((_now + delay, id));
+            Journal.Add($"schedule {key.Serialize()}");
+            _timers.RemoveAll(t => t.Key.Serialize() == key.Serialize());
+            _timers.Add((_now + delay, key));
             return default;
         }
 
         public ValueTask CancelTimer(DurableEffect effect, CancelEffect cancel)
         {
-            var id = cancel.SendId;
+            var id = cancel.Key.Serialize();
             Journal.Add($"cancel {id}");
-            _timers.RemoveAll(t => t.Id == id);
+            _timers.RemoveAll(t => t.Key.Serialize() == id);
             return default;
         }
 
@@ -343,7 +344,7 @@ public class DurableExecutionTests
             _timers.Remove(next);
             _now = next.Due;
 
-            return new ValueTask<MachineEvent>(new TimerEvent(next.Id));
+            return new ValueTask<MachineEvent>(new TimerEvent(next.Key));
         }
     }
 }

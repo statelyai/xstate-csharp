@@ -36,7 +36,7 @@ public class PersistenceTests
         var machine = Job(worker);
 
         var initial = machine.GetInitialState();
-        var timerId = Assert.Single(initial.State.Timers.Keys);
+        var timerKey = Assert.Single(initial.State.Timers).Key;
 
         var persisted = machine.Persist(
             initial.State,
@@ -50,7 +50,7 @@ public class PersistenceTests
         Assert.False(child.Remote);
         Assert.NotNull(child.Snapshot);
 
-        var timer = Assert.Single(persisted.Timers).Value;
+        var timer = Assert.Single(persisted.Timers);
         Assert.Equal("@xstate.raise", timer.Type);
         Assert.Equal(5000, timer.DelayMs);
         Assert.Null(timer.Target);
@@ -63,17 +63,17 @@ public class PersistenceTests
         Assert.False(toRestore.Remote);
 
         var toRearm = Assert.Single(restored.Timers);
-        Assert.Equal(timerId, toRearm.Id);
+        Assert.Equal(timerKey, toRearm.Key);
         Assert.Equal(TimeSpan.FromSeconds(5), toRearm.Delay);
 
         // The restored snapshot is the same state, and continues identically.
         Assert.Equal(initial.State.Configuration, restored.State.Configuration);
         Assert.True(restored.State.Matches("running"));
 
-        var fired = machine.Transition(restored.State, new TimerEvent(timerId));
+        var fired = machine.Transition(restored.State, new TimerEvent(timerKey));
         Assert.True(fired.State.Matches("timedOut"));
         Assert.Equal(
-            machine.Transition(initial.State, new TimerEvent(timerId)).Effects.Select(e => e.Kind),
+            machine.Transition(initial.State, new TimerEvent(timerKey)).Effects.Select(e => e.Kind),
             fired.Effects.Select(e => e.Kind));
     }
 
@@ -85,7 +85,7 @@ public class PersistenceTests
         var options = SnapshotJson.DefaultOptions();
 
         var initial = machine.GetInitialState();
-        var timerId = Assert.Single(initial.State.Timers.Keys);
+        var timerKey = Assert.Single(initial.State.Timers).Key;
 
         var json = JsonSerializer.Serialize(
             machine.Persist(initial.State, new PersistOptions { ChildSnapshot = _ => Persist(worker) }),
@@ -101,8 +101,8 @@ public class PersistenceTests
         Assert.Equal("worker", Assert.Single(restored.Children).Src);
         Assert.Equal(TimeSpan.FromSeconds(5), Assert.Single(restored.Timers).Delay);
 
-        var expected = machine.Transition(initial.State, new TimerEvent(timerId));
-        var actual = machine.Transition(restored.State, new TimerEvent(timerId));
+        var expected = machine.Transition(initial.State, new TimerEvent(timerKey));
+        var actual = machine.Transition(restored.State, new TimerEvent(timerKey));
 
         Assert.True(actual.State.Matches("timedOut"));
         Assert.Equal(expected.State.Configuration, actual.State.Configuration);
@@ -262,13 +262,13 @@ public class PersistenceTests
         var machine = Job(Worker());
         var persisted = machine.Persist(machine.GetInitialState().State, new PersistOptions { EmbedChildren = false });
 
-        var stray = Assert.Single(persisted.Timers).Value with { Target = "ghost" };
+        var stray = Assert.Single(persisted.Timers) with { Target = "ghost" };
         var error = Assert.Throws<InvalidOperationException>(() => machine.Restore(persisted with
         {
-            Timers = new Dictionary<string, PersistedTimer> { [stray.Id] = stray }
+            Timers = [stray]
         }));
 
-        Assert.Equal($"Unable to restore timer '{stray.Id}': target actor 'ghost' is unavailable.", error.Message);
+        Assert.Equal($"Unable to restore timer {TimerKey.For(stray.Id, stray.Seq, stray.Event).Serialize()}: target actor 'ghost' is unavailable.", error.Message);
     }
 
     // --- Counter folding ---

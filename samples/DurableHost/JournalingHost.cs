@@ -15,7 +15,7 @@ public sealed class WorkerCrashedException(string waitId)
 public sealed class JournalingHost : IDurableHost
 {
     private readonly Channel<MachineEvent> _mailbox = Channel.CreateUnbounded<MachineEvent>();
-    private readonly Dictionary<(string Source, string Id), CancellationTokenSource> _timers = new();
+    private readonly Dictionary<(string Source, string Key), CancellationTokenSource> _timers = new();
     private readonly Dictionary<string, ChildEntry> _children = new(StringComparer.Ordinal);
 
     /// <summary>Effect ids this host has already carried out. Replaying one is a no-op.</summary>
@@ -138,25 +138,33 @@ public sealed class JournalingHost : IDurableHost
 
     // --- Timers ---
 
-    // The machine owns the timer id; the host owns only the clock. The originating effect is
+    // The machine owns the timer key; the host owns only the clock. The originating effect is
     // passed so the operation can be journaled under its effect id like every other one.
 
-    public ValueTask ScheduleTimer(DurableEffect effect, string id, TimeSpan delay)
+    public ValueTask ScheduleTimer(DurableEffect effect, TimerKey key, TimeSpan delay)
     {
+        var id = key.Serialize();
         Log($"{effect.Id,-8} schedule         {id} in {delay.TotalMilliseconds}ms");
 
-        // Timer ids are per actor, so the alarm is keyed by the owning actor's address too.
+        // Timer keys are per actor, so the alarm is keyed by the owning actor's address too.
+        // Scheduling a key that is already armed replaces it: the machine reschedules in place.
         var cts = new CancellationTokenSource();
+        if (_timers.Remove((effect.Source, id), out var previous))
+        {
+            previous.Cancel();
+            previous.Dispose();
+        }
+
         _timers[(effect.Source, id)] = cts;
 
-        // When it elapses, the host tells the actor which id fired — nothing more. The machine
-        // looks the id up on its own ledger and decides what firing means.
+        // When it elapses, the host tells the actor which key fired — nothing more. The machine
+        // looks the key up on its own ledger and decides what firing means.
         _ = Task.Delay(delay, cts.Token).ContinueWith(
             task =>
             {
                 if (task.IsCompletedSuccessfully)
                 {
-                    _mailbox.Writer.TryWrite(new TimerEvent(id));
+                    _mailbox.Writer.TryWrite(new TimerEvent(key));
                 }
             },
             TaskScheduler.Default);
@@ -166,7 +174,7 @@ public sealed class JournalingHost : IDurableHost
 
     public ValueTask CancelTimer(DurableEffect effect, CancelEffect cancel)
     {
-        var id = cancel.SendId;
+        var id = cancel.Key.Serialize();
         Log($"{effect.Id,-8} cancel           {id}");
 
         if (_timers.Remove((effect.Source, id), out var cts))

@@ -246,7 +246,7 @@ internal static class ScxmlExecutableContent
             sendId = value.IsUndefined() ? string.Empty : TypeConverter.ToString(value);
         }
 
-        sink.Effects.Add(new CancelEffect(sendId));
+        sink.Effects.Add(new CancelEffect(new TimerKey.ById(sendId)));
         return true;
     }
 

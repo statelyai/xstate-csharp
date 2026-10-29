@@ -15,15 +15,33 @@ public enum TimerKind
 /// <summary>
 /// A timer the machine believes is outstanding — the durable half of a delayed raise/send.
 /// The host owns only the clock: when the delay elapses it sends <see cref="TimerEvent"/> with
-/// this id back to the owning actor, and the machine decides what firing means.
+/// this timer's <see cref="Key"/> back to the owning actor, and the machine decides what firing
+/// means.
 /// </summary>
+/// <param name="Id">The explicit id the raise/send was scheduled with, if any.</param>
+/// <param name="Seq">
+/// The actor's sequence number for an id-less delayed raise/send. Built-in <c>after</c>/
+/// <c>timeout</c> timers have neither id nor seq; their event identifies them.
+/// </param>
 /// <param name="Target">The send target; null means the owning actor itself.</param>
 public sealed record LogicalTimer(
-    string Id,
+    string? Id,
+    int? Seq,
     TimeSpan Delay,
     TimerKind Kind,
     MachineEvent Event,
-    string? Target);
+    string? Target)
+{
+    /// <summary>This timer's identity: id, else seq, else event (v6 <c>getTimerKey</c>).</summary>
+    public TimerKey Key => TimerKey.For(this);
+
+    /// <summary>
+    /// The timer's absolute start in Unix milliseconds, as a host recorded it
+    /// (<see cref="Persistence.PersistedTimer.ScheduledAt"/>). The pure core never sets it; it
+    /// only carries it through restore so a host can re-arm against the original deadline.
+    /// </summary>
+    public double? ScheduledAt { get; init; }
+}
 
 /// <summary>
 /// A child actor the machine believes is running.
@@ -79,8 +97,9 @@ public sealed record State<TContext> : ISnapshot
         ImmutableDictionary.Create<string, int>(StringComparer.Ordinal);
 
     /// <summary>
-    /// Next index for generated timer ids (<c>xstate.timer.auto.{n}</c>); monotonic across
-    /// macrosteps. xstate v6 counterpart: <c>_nextTimerId</c> (<c>transitionActions.ts</c>).
+    /// Next timer sequence number (<see cref="LogicalTimer.Seq"/>) for an id-less delayed
+    /// raise/send; monotonic across macrosteps. xstate v6 counterpart: <c>_nextTimerId</c>
+    /// (<c>transitionActions.ts</c>).
     /// </summary>
     public int NextTimerId { get; internal init; }
 
@@ -95,9 +114,8 @@ public sealed record State<TContext> : ISnapshot
     /// <summary>Children believed to be running (invoked + spawned), in spawn order.</summary>
     public ImmutableArray<ChildRecord> Children { get; internal init; } = [];
 
-    /// <summary>Logical timers believed to be outstanding, keyed by timer id.</summary>
-    public ImmutableDictionary<string, LogicalTimer> Timers { get; internal init; } =
-        ImmutableDictionary.Create<string, LogicalTimer>(StringComparer.Ordinal);
+    /// <summary>Logical timers believed to be outstanding, in scheduling order.</summary>
+    public ImmutableList<LogicalTimer> Timers { get; internal init; } = [];
 
     /// <summary>
     /// Per-state input (xstate v6 <c>_stateInputs</c>): the value the transition that entered a

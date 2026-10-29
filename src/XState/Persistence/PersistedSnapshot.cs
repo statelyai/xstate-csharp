@@ -1,3 +1,6 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace XState.Persistence;
 
 /// <summary>
@@ -66,7 +69,14 @@ public sealed record PersistedChild
 /// </summary>
 public sealed record PersistedTimer
 {
-    public required string Id { get; init; }
+    /// <summary>The explicit id the raise/send was scheduled with, if any.</summary>
+    public string? Id { get; init; }
+
+    /// <summary>
+    /// The timer sequence number of an id-less delayed raise/send. Built-in <c>after</c>/
+    /// <c>timeout</c> timers have neither id nor seq; their event identifies them.
+    /// </summary>
+    public int? Seq { get; init; }
 
     /// <summary>The declared delay in milliseconds.</summary>
     public required double DelayMs { get; init; }
@@ -90,6 +100,13 @@ public sealed record PersistedTimer
     /// </para>
     /// </summary>
     public string? Target { get; init; }
+
+    /// <summary>
+    /// The timer's absolute start in Unix milliseconds (v6 <c>scheduledAt</c>). Host-supplied:
+    /// the pure core never sets it, only carries it through
+    /// <see cref="LogicalTimer.ScheduledAt"/> so re-persisting keeps the original deadline.
+    /// </summary>
+    public double? ScheduledAt { get; init; }
 }
 
 /// <summary>
@@ -133,9 +150,12 @@ public sealed record PersistedSnapshot
     /// <summary>Children the snapshot believes are running, in spawn order.</summary>
     public IReadOnlyList<PersistedChild> Children { get; init; } = [];
 
-    /// <summary>Outstanding logical timers, keyed by timer id.</summary>
-    public IReadOnlyDictionary<string, PersistedTimer> Timers { get; init; } =
-        new Dictionary<string, PersistedTimer>(StringComparer.Ordinal);
+    /// <summary>
+    /// Outstanding logical timers, in scheduling order. The pre-alpha.68 shape — an object keyed
+    /// by timer id — is rejected on deserialization.
+    /// </summary>
+    [JsonConverter(typeof(PersistedTimerListConverter))]
+    public IReadOnlyList<PersistedTimer> Timers { get; init; } = [];
 
     /// <summary>
     /// History node id → recorded state ids.
@@ -152,7 +172,7 @@ public sealed record PersistedSnapshot
     public IReadOnlyDictionary<string, int> NextActorIds { get; init; } =
         new Dictionary<string, int>(StringComparer.Ordinal);
 
-    /// <summary>Next generated timer index (<see cref="State{TContext}.NextTimerId"/>).</summary>
+    /// <summary>Next timer sequence number (<see cref="State{TContext}.NextTimerId"/>).</summary>
     public int NextTimerId { get; init; }
 
     /// <summary>Next child incarnation token (<see cref="State{TContext}.NextIncarnation"/>).</summary>
@@ -208,4 +228,48 @@ public static class PersistedStatus
         _ => throw new InvalidOperationException(
             $"Persisted snapshot has an unknown status '{status}'.")
     };
+}
+
+/// <summary>
+/// Reads <see cref="PersistedSnapshot.Timers"/> as a list, rejecting the old record shape
+/// (an object keyed by timer id) with an <see cref="InvalidOperationException"/>.
+/// </summary>
+internal sealed class PersistedTimerListConverter : JsonConverter<IReadOnlyList<PersistedTimer>>
+{
+    public override IReadOnlyList<PersistedTimer> Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType is JsonTokenType.StartObject)
+        {
+            throw new InvalidOperationException(
+                "Persisted 'timers' is an object keyed by timer id — the pre-alpha.68 record shape. " +
+                "Timers are now an ordered list; re-persist the snapshot with this version.");
+        }
+
+        if (reader.TokenType is not JsonTokenType.StartArray)
+        {
+            throw new JsonException("Persisted 'timers' must be an array.");
+        }
+
+        var timers = new List<PersistedTimer>();
+        while (reader.Read() && reader.TokenType is not JsonTokenType.EndArray)
+        {
+            timers.Add(JsonSerializer.Deserialize<PersistedTimer>(ref reader, options)
+                       ?? throw new JsonException("A persisted timer cannot be null."));
+        }
+
+        return timers;
+    }
+
+    public override void Write(
+        Utf8JsonWriter writer, IReadOnlyList<PersistedTimer> value, JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        foreach (var timer in value)
+        {
+            JsonSerializer.Serialize(writer, timer, options);
+        }
+
+        writer.WriteEndArray();
+    }
 }

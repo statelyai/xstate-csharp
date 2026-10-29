@@ -179,11 +179,12 @@ public sealed class DurableExecution<TContext> : IDurableExecution
 
         // A delayed raise is a timer on the raising actor itself; only the elapsed timer, reported
         // back as `xstate.timer`, turns it into an event.
-        RaiseEffect raise => _host.ScheduleTimer(tagged, raise.Id!, raise.Delay),
+        RaiseEffect raise => _host.ScheduleTimer(tagged, TimerKey.For(raise.Id, raise.Seq, raise.Event), raise.Delay),
 
         // A delayed send is a timer on the *sender*, not the target: the sender owns the ledger
         // entry and is the only actor that can cancel it.
-        SendToEffect { Delay: { } delay } send => _host.ScheduleTimer(tagged, send.Id!, delay),
+        SendToEffect { Delay: { } delay } send =>
+            _host.ScheduleTimer(tagged, TimerKey.For(send.Id, send.Seq, send.Event), delay),
         SendToEffect send => _host.SendEvent(tagged, send),
 
         CancelEffect cancel => _host.CancelTimer(tagged, cancel),
@@ -202,11 +203,13 @@ public sealed class DurableExecution<TContext> : IDurableExecution
     /// <c>"restore:{transitionIndex}:{i}"</c> so a host that journals by effect id can recognise a
     /// re-arm it already accepted for this checkpoint.
     /// <para>
-    /// The snapshot records a timer's <em>declared</em> delay only. A host that persisted the
-    /// deadline when it accepted <see cref="IDurableHost.ScheduleTimer"/> passes
-    /// <paramref name="remainingDelay"/> to re-arm with what is left (clamped at zero), the way
-    /// v6's <c>Actor.start()</c> uses a persisted <c>startedAt</c>; without it every timer restarts
-    /// from its full delay, so a worker that crashes repeatedly can postpone it indefinitely.
+    /// The core records a timer's <em>declared</em> delay; a host may also have stamped
+    /// <see cref="LogicalTimer.ScheduledAt"/> (Unix ms) into the persisted snapshot. A host that
+    /// knows the deadline passes <paramref name="remainingDelay"/> to re-arm with what is left
+    /// (clamped at zero); without it a timer carrying <c>ScheduledAt</c> re-arms with
+    /// <c>ScheduledAt + Delay - now</c>, the way v6's <c>Actor.start()</c> uses a persisted
+    /// <c>scheduledAt</c>, and any other timer restarts from its full delay — so a worker that
+    /// crashes repeatedly can postpone it indefinitely.
     /// </para>
     /// </summary>
     public async Task RearmTimers(
@@ -221,8 +224,11 @@ public sealed class DurableExecution<TContext> : IDurableExecution
             cancellationToken.ThrowIfCancellationRequested();
             var timer = timers[i];
             Effect effect = timer.Kind is TimerKind.Raise
-                ? new RaiseEffect(timer.Event, timer.Id, timer.Delay)
-                : new SendToEffect(timer.Target ?? EffectTarget.Self, timer.Event, timer.Id, timer.Delay);
+                ? new RaiseEffect(timer.Event, timer.Id, timer.Delay) { Seq = timer.Seq }
+                : new SendToEffect(timer.Target ?? EffectTarget.Self, timer.Event, timer.Id, timer.Delay)
+                {
+                    Seq = timer.Seq
+                };
             var tagged = new DurableEffect(
                 $"restore:{_startingTransitionIndex.ToString(CultureInfo.InvariantCulture)}:{i.ToString(CultureInfo.InvariantCulture)}",
                 _startingTransitionIndex,
@@ -230,13 +236,17 @@ public sealed class DurableExecution<TContext> : IDurableExecution
                 RootAddress,
                 effect,
                 EffectDescriptor.Of(effect, RootAddress));
-            var delay = remainingDelay is null ? timer.Delay : remainingDelay(timer);
+            var delay = remainingDelay is not null ? remainingDelay(timer)
+                : timer.ScheduledAt is { } scheduledAt
+                    ? TimeSpan.FromMilliseconds(scheduledAt) + timer.Delay -
+                      TimeSpan.FromMilliseconds(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+                    : timer.Delay;
             if (delay < TimeSpan.Zero)
             {
                 delay = TimeSpan.Zero;
             }
 
-            await _host.ScheduleTimer(tagged, timer.Id, delay).ConfigureAwait(false);
+            await _host.ScheduleTimer(tagged, timer.Key, delay).ConfigureAwait(false);
         }
     }
 

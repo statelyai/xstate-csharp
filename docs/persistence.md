@@ -9,7 +9,7 @@ var restored = machine.Restore(persisted);
 
 Persist the result of `Persist`, never a `State<TContext>`. A live snapshot holds the machine that
 produced it and CLR exceptions; `PersistedSnapshot` holds neither. It carries the state value, the
-context, the child ledger, the timer ledger, history, the generated-id counters, and the identity
+context, the child ledger, the timer ledger (an ordered list), history, the generated-id counters, and the identity
 of the machine that wrote it — everything a different process needs to reconstruct the actor, and
 nothing that only means something inside the process that produced it.
 
@@ -58,12 +58,14 @@ public sealed record RestoreResult<TContext>(
 
 Bring them back before you resume. Each `ChildToRestore` carries its id, address, incarnation and
 either the `Logic` to re-create (resolved from the machine's registered sources) or `Remote = true`
-for one to re-attach to. Each `LogicalTimer` carries the id to re-arm and its declared delay:
+for one to re-attach to. `Timers` is in scheduling order; each `LogicalTimer` carries the `Key` to
+re-arm, its declared delay, and the host-supplied `ScheduledAt` (Unix ms) if one was persisted —
+the core never sets it:
 
 ```csharp
 foreach (var timer in restored.Timers)
 {
-    await resumedHost.ScheduleTimer(resumed.RootAddress, timer.Id, timer.Delay);
+    await resumedHost.ScheduleTimer(resumed.RootAddress, timer.Key, timer.Delay);
 }
 ```
 

@@ -65,7 +65,7 @@ references become addresses.
 | `SpawnEffect` / `StartEffect` | `@xstate.spawn`, `@xstate.start` | Create a child; start it at the end of the macrostep. |
 | `StopChildEffect` | `@xstate.stop` | Stop a child. |
 | `RaiseEffect` / `SendToEffect` | `@xstate.raise`, `@xstate.sendTo` | Delayed self-raise; send to another actor, now or delayed. |
-| `CancelEffect` | `@xstate.cancel` | Cancel a logical timer by id. |
+| `CancelEffect` | `@xstate.cancel` | Cancel a logical timer by `TimerKey` (id, seq or event). |
 | `TerminateEffect` | `@xstate.terminate` | Actor reached `Done` or `Error`; relay to the parent. |
 | `DeadLetterEffect` | `@xstate.deadLetter` | Event rejected at the boundary, never delivered. |
 | `EmitEffect` | `emit` | Emit an event to subscribers. |

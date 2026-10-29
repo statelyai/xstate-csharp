@@ -371,7 +371,9 @@ public class CoreTransitionTests
         // v6 compiles `after` into a delayed raise scheduled on entry and cancelled on exit.
         var raise = Assert.IsType<RaiseEffect>(Assert.Single(initial.Effects));
         Assert.Equal(TimeSpan.FromMilliseconds(1000), raise.Delay);
-        Assert.Equal("xstate.after.1000.timer.loading", raise.Id);
+        // Built-in timers carry no id or seq: their event is their identity.
+        Assert.Null(raise.Id);
+        Assert.Null(raise.Seq);
 
         var afterEvent = Assert.IsType<AfterEvent>(raise.Event);
         Assert.Equal("timer.loading", afterEvent.StateId);
@@ -379,11 +381,12 @@ public class CoreTransitionTests
         // The host reports only that the timer elapsed; the machine releases the event itself.
         Assert.Equal(
             afterEvent,
-            Assert.Single(initial.State.Timers.Values).Event);
+            Assert.Single(initial.State.Timers).Event);
 
-        var next = machine.Transition(initial.State, new TimerEvent(raise.Id!));
+        var key = new TimerKey.ByEvent(new AfterEvent("1000", "timer.loading"));
+        var next = machine.Transition(initial.State, new TimerEvent(key));
         Assert.True(next.State.Matches("ready"));
-        Assert.Contains(next.Effects, e => e is CancelEffect c && c.SendId == "xstate.after.1000.timer.loading");
+        Assert.Contains(next.Effects, e => e is CancelEffect c && c.Key == key);
     }
 
     // --- 9. Final states and output ---
@@ -1086,7 +1089,7 @@ public class CoreTransitionTests
         var done = machine.Transition(initial.State, new Go());
 
         Assert.Equal(SnapshotStatus.Done, done.State.Status);
-        Assert.Contains(done.Effects, e => e is CancelEffect { SendId: "later" });
+        Assert.Contains(done.Effects, e => e is CancelEffect { Key: TimerKey.ById { Id: "later" } });
         Assert.Contains(done.Effects, e => e is StopChildEffect stop && stop.ChildId == spawnId);
     }
 
@@ -1113,7 +1116,7 @@ public class CoreTransitionTests
         // v6 `macrostep`'s `xstate.stop` branch is `stopChildren` + `cancelTimers` and nothing
         // else: stopping is not an exit, so no exit action runs.
         Assert.Empty(log);
-        Assert.Contains(stopped.Effects, e => e is CancelEffect { SendId: "later" });
+        Assert.Contains(stopped.Effects, e => e is CancelEffect { Key: TimerKey.ById { Id: "later" } });
         Assert.Contains(stopped.Effects, e => e is StopChildEffect { ChildId: "child" });
 
         // A stopped actor accepts nothing: every further event is dead-lettered.
@@ -1141,8 +1144,11 @@ public class CoreTransitionTests
         // Equal durations must not collapse onto one timer key.
         var interpreter = DeterministicInterpreter.Start(machine);
         Assert.Equal(
-            ["xstate.after.1000.dup-delay.a", "xstate.after.1000$1.dup-delay.a"],
-            interpreter.PendingSends.Select(s => s.Id));
+            [
+                new TimerKey.ByEvent(new AfterEvent("1000", "dup-delay.a")),
+                new TimerKey.ByEvent(new AfterEvent("1000$1", "dup-delay.a"))
+            ],
+            interpreter.PendingSends.Select(s => s.Key));
 
         interpreter.AdvanceTime(TimeSpan.FromSeconds(1));
         Assert.Equal(["first", "second"], seen);

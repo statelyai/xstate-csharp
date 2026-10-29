@@ -521,7 +521,7 @@ public class ScxmlParserTests
             </state>
             """);
 
-        var cancels = machine.GetInitialState().Effects.OfType<CancelEffect>().Select(c => c.SendId).ToList();
+        var cancels = machine.GetInitialState().Effects.OfType<CancelEffect>().Select(c => ((TimerKey.ById)c.Key).Id).ToList();
 
         Assert.Equal(["static", "dynamic"], cancels);
     }

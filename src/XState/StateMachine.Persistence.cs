@@ -76,8 +76,8 @@ public sealed partial class StateMachine<TContext>
 
         var liveChildIds = state.Children.Select(c => c.Id).ToHashSet(StringComparer.Ordinal);
 
-        var timers = new Dictionary<string, PersistedTimer>(StringComparer.Ordinal);
-        foreach (var (id, timer) in state.Timers)
+        var timers = new List<PersistedTimer>(state.Timers.Count);
+        foreach (var timer in state.Timers)
         {
             // v6 State.ts:672-681: a send target that is no longer addressable would restore into
             // a timer with nowhere to fire.
@@ -87,13 +87,14 @@ public sealed partial class StateMachine<TContext>
                 !liveChildIds.Contains(target))
             {
                 throw new InvalidOperationException(
-                    $"Unable to persist timer '{id}': target actor '{target}' is no longer " +
+                    $"Unable to persist timer {timer.Key.Serialize()}: target actor '{target}' is no longer " +
                     "addressable from this snapshot.");
             }
 
-            timers[id] = new PersistedTimer
+            timers.Add(new PersistedTimer
             {
                 Id = timer.Id,
+                Seq = timer.Seq,
                 DelayMs = timer.Delay.TotalMilliseconds,
                 Type = timer.Kind is TimerKind.Raise ? "@xstate.raise" : "@xstate.sendTo",
                 // v6 State.ts:655-659: the session id on a pending actor-timeout belongs to the
@@ -102,8 +103,9 @@ public sealed partial class StateMachine<TContext>
                 Event = timer.Event is ActorTimeoutEvent { SessionId: not null } timeout
                     ? new ActorTimeoutEvent(timeout.ActorId)
                     : timer.Event,
-                Target = timer.Target is EffectTarget.Self ? null : timer.Target
-            };
+                Target = timer.Target is EffectTarget.Self ? null : timer.Target,
+                ScheduledAt = timer.ScheduledAt
+            });
         }
 
         var history = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
@@ -201,7 +203,7 @@ public sealed partial class StateMachine<TContext>
 
         // 2. Timers — re-armed by the host, so every target has to resolve now.
         var timers = new List<LogicalTimer>(snapshot.Timers.Count);
-        foreach (var (id, persisted) in snapshot.Timers.OrderBy(t => t.Key, StringComparer.Ordinal))
+        foreach (var persisted in snapshot.Timers)
         {
             string? target = persisted.Target;
             if (target is not null && target != EffectTarget.Parent)
@@ -213,7 +215,7 @@ public sealed partial class StateMachine<TContext>
                 else if (!childrenById.ContainsKey(target))
                 {
                     throw new InvalidOperationException(
-                        $"Unable to restore timer '{id}': target actor '{target}' is unavailable.");
+                        $"Unable to restore timer {TimerKey.For(persisted.Id, persisted.Seq, persisted.Event).Serialize()}: target actor '{target}' is unavailable.");
                 }
             }
 
@@ -227,10 +229,14 @@ public sealed partial class StateMachine<TContext>
 
             timers.Add(new LogicalTimer(
                 persisted.Id,
+                persisted.Seq,
                 TimeSpan.FromMilliseconds(persisted.DelayMs),
                 persisted.Type == "@xstate.raise" ? TimerKind.Raise : TimerKind.SendTo,
                 evt,
-                target));
+                target)
+            {
+                ScheduledAt = persisted.ScheduledAt
+            });
         }
 
         // 3. History — v6 StateMachine.ts:1508-1544 warns and skips unresolvable ids rather than
@@ -284,7 +290,7 @@ public sealed partial class StateMachine<TContext>
             NextTimerId = snapshot.NextTimerId,
             NextIncarnation = snapshot.NextIncarnation,
             Children = [.. children.Select(c => new ChildRecord(c.Id, c.Src, c.Incarnation))],
-            Timers = timers.ToImmutableDictionary(t => t.Id, t => t, StringComparer.Ordinal),
+            Timers = [.. timers],
             StateInputs = snapshot.StateInputs is null
                 ? ImmutableDictionary.Create<string, object?>(StringComparer.Ordinal)
                 : snapshot.StateInputs.ToImmutableDictionary(e => e.Key, e => e.Value, StringComparer.Ordinal)

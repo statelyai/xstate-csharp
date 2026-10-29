@@ -37,12 +37,12 @@ public sealed record StopEvent : MachineEvent
 /// <summary>
 /// xstate.timer (v6 <c>XSTATE_TIMER</c>) — the host-neutral firing input for a logical timer
 /// the machine scheduled (a delayed raise or a delayed send-to). The host schedules nothing on
-/// the machine's behalf beyond the id: when the delay elapses it sends
-/// <c>TimerEvent(Id)</c> back to the actor that owns the timer, and the machine looks the id up
-/// in its own <see cref="State{TContext}.Timers"/> ledger. An id that is no longer on the ledger
-/// is a stale firing and is ignored.
+/// the machine's behalf beyond the key: when the delay elapses it sends
+/// <c>TimerEvent(Key)</c> back to the actor that owns the timer, and the machine looks the key up
+/// in its own <see cref="State{TContext}.Timers"/> ledger. A key that matches nothing on the
+/// ledger is a stale firing and is ignored.
 /// </summary>
-public sealed record TimerEvent(string Id) : MachineEvent
+public sealed record TimerEvent(TimerKey Key) : MachineEvent
 {
     public override string Type => "xstate.timer";
 }
@@ -78,25 +78,18 @@ public sealed record ErrorActorEvent(string ActorId, Exception Error, string? Se
 public sealed record AfterEvent(object Delay, string StateId) : MachineEvent
 {
     public override string Type => "xstate.after";
-
-    /// <summary>Timer id of the scheduled raise (xstate.after.{delay}.{stateId}).</summary>
-    public string SendId => $"xstate.after.{Delay}.{StateId}";
 }
 
 /// <summary>xstate.timeout.state — a state-level timeout elapsed without the state exiting.</summary>
 public sealed record TimeoutEvent(string StateId) : MachineEvent
 {
     public override string Type => "xstate.timeout.state";
-
-    public string SendId => $"xstate.timeout.{StateId}";
 }
 
 /// <summary>xstate.timeout.actor — an invoked actor exceeded its timeout.</summary>
 public sealed record ActorTimeoutEvent(string ActorId, string? SessionId = null) : MachineEvent
 {
     public override string Type => "xstate.timeout.actor";
-
-    public string SendId => $"xstate.timeout.actor.{ActorId}";
 }
 
 /// <summary>

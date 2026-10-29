@@ -32,8 +32,8 @@ public sealed partial class StateMachine<TContext>
         public Dictionary<string, int> NextActorIds { get; } = new(StringComparer.Ordinal);
 
         /// <summary>
-        /// Next generated delayed send/raise index (xstate v6 <c>_nextTimerId</c>); carried across
-        /// macrosteps on the snapshot.
+        /// Next timer sequence number for an id-less delayed send/raise (xstate v6
+        /// <c>_nextTimerId</c>); carried across macrosteps on the snapshot.
         /// </summary>
         public int NextTimerId { get; set; }
 
@@ -183,15 +183,15 @@ public sealed partial class StateMachine<TContext>
     }
 
     /// <summary>
-    /// <c>xstate.timer</c> — the host reports that the timer with this id elapsed. An id that is
-    /// no longer on the ledger is a stale firing (the timer was cancelled, or its state exited)
+    /// <c>xstate.timer</c> — the host reports that the timer with this key elapsed. A key that
+    /// matches nothing on the ledger is a stale firing (the timer was cancelled, or its state exited)
     /// and changes nothing. Otherwise the timer is struck off and its event delivered: a
     /// <see cref="TimerKind.Raise"/> onto the internal queue, a <see cref="TimerKind.SendTo"/> as
     /// an immediate send (stateUtils.ts `macrostep`, the XSTATE_TIMER branch).
     /// </summary>
     private TransitionResult<TContext> FireTimer(Run run, State<TContext> state, TimerEvent evt)
     {
-        var timer = run.Timers.FirstOrDefault(t => t.Id == evt.Id);
+        var timer = run.Timers.FirstOrDefault(evt.Key.Matches);
         if (timer is null)
         {
             return new TransitionResult<TContext>(state, []);
@@ -301,9 +301,7 @@ public sealed partial class StateMachine<TContext>
             run.StateInputs[stateId] = input;
         }
 
-        // `Timers` is keyed by id, so the persisted ledger has no order of its own; restoring it
-        // in id order keeps teardown (which cancels every outstanding timer) reproducible.
-        run.Timers.AddRange(state.Timers.Values.OrderBy(t => t.Id, StringComparer.Ordinal));
+        run.Timers.AddRange(state.Timers);
 
         // Defensive restore floor. The counters travel on the same snapshot as `Children`, so a
         // snapshot this machine produced already reserves every generated-shaped child id — but a
@@ -338,7 +336,7 @@ public sealed partial class StateMachine<TContext>
                 NextTimerId = run.NextTimerId,
                 NextIncarnation = run.NextIncarnation,
                 Children = [.. run.Children],
-                Timers = run.Timers.ToImmutableDictionary(t => t.Id, t => t, StringComparer.Ordinal),
+                Timers = [.. run.Timers],
                 StateInputs = run.StateInputs.ToImmutableDictionary(StringComparer.Ordinal)
             },
             [.. run.Effects]);
@@ -442,7 +440,7 @@ public sealed partial class StateMachine<TContext>
             // (stateUtils.ts:514-522, `matchesActorSession`).
             Emit(run, new RaiseEffect(
                 new ActorTimeoutEvent(invoke.Id, spawned.Incarnation),
-                invoke.TimeoutSendId,
+                null,
                 invoke.Timeout.Resolve(args)));
         }
     }
@@ -551,7 +549,7 @@ public sealed partial class StateMachine<TContext>
 
         if (node.Timeout is not null)
         {
-            Emit(run, new CancelEffect(node.TimeoutSendId));
+            Emit(run, new CancelEffect(new TimerKey.ByEvent(new TimeoutEvent(node.Id))));
         }
 
         RunActions(run, node.Exit, evt, node.Id);
@@ -567,7 +565,7 @@ public sealed partial class StateMachine<TContext>
         {
             if (invoke.Timeout is not null)
             {
-                Emit(run, new CancelEffect(invoke.TimeoutSendId));
+                Emit(run, new CancelEffect(new TimerKey.ByEvent(new ActorTimeoutEvent(invoke.Id))));
             }
 
             Emit(run, new StopChildEffect(invoke.Id));
@@ -587,10 +585,10 @@ public sealed partial class StateMachine<TContext>
     /// </summary>
     private static void CancelActorTimeout(Run run, string actorId)
     {
-        var timerId = $"xstate.timeout.actor.{actorId}";
-        if (run.Timers.Any(t => t.Id == timerId))
+        var key = new TimerKey.ByEvent(new ActorTimeoutEvent(actorId));
+        if (run.Timers.Any(key.Matches))
         {
-            Emit(run, new CancelEffect(timerId));
+            Emit(run, new CancelEffect(key));
         }
     }
 
@@ -602,7 +600,7 @@ public sealed partial class StateMachine<TContext>
     {
         foreach (var timer in run.Timers.ToList())
         {
-            Emit(run, new CancelEffect(timer.Id));
+            Emit(run, new CancelEffect(timer.Key));
         }
 
         foreach (var child in run.Children.ToList())
@@ -613,9 +611,8 @@ public sealed partial class StateMachine<TContext>
 
     /// <summary>
     /// Records an effect and keeps the child/timer bookkeeping in sync. The recorded effect may
-    /// differ from the one passed in (a spawn is stamped with its incarnation token; an id-less
-    /// delayed raise/send is given a generated timer id), and a delayed raise/send that replaces
-    /// an outstanding timer of the same id is preceded by its cancel.
+    /// differ from the one passed in (a spawn is stamped with its incarnation token; an id-less,
+    /// non-built-in delayed raise/send is stamped with the next timer sequence number).
     /// </summary>
     private static Effect Emit(Run run, Effect effect)
     {
@@ -662,22 +659,22 @@ public sealed partial class StateMachine<TContext>
 
             case RaiseEffect raise:
             {
-                var timerId = raise.Id ?? MintTimerId(run);
-                if (raise.Id is null)
+                var seq = NextSeq(run, raise.Id, raise.Event);
+                if (seq is not null)
                 {
-                    effect = raise with { Id = timerId };
+                    effect = raise with { Seq = seq };
                 }
 
-                ScheduleTimer(run, new LogicalTimer(timerId, raise.Delay, TimerKind.Raise, raise.Event, null));
+                ScheduleTimer(run, new LogicalTimer(raise.Id, seq, raise.Delay, TimerKind.Raise, raise.Event, null));
                 break;
             }
 
             case SendToEffect { Delay: not null } send:
             {
-                var timerId = send.Id ?? MintTimerId(run);
-                if (send.Id is null)
+                var seq = NextSeq(run, send.Id, send.Event);
+                if (seq is not null)
                 {
-                    effect = send with { Id = timerId };
+                    effect = send with { Seq = seq };
                 }
 
                 // The timer lives on the *sender*; `null` records "deliver to myself", matching
@@ -685,12 +682,12 @@ public sealed partial class StateMachine<TContext>
                 var target = send.Target == EffectTarget.Self ? null : send.Target;
                 ScheduleTimer(
                     run,
-                    new LogicalTimer(timerId, send.Delay.Value, TimerKind.SendTo, send.Event, target));
+                    new LogicalTimer(send.Id, seq, send.Delay.Value, TimerKind.SendTo, send.Event, target));
                 break;
             }
 
             case CancelEffect cancel:
-                run.Timers.RemoveAll(t => t.Id == cancel.SendId);
+                run.Timers.RemoveAll(cancel.Key.Matches);
                 break;
         }
 
@@ -699,24 +696,31 @@ public sealed partial class StateMachine<TContext>
     }
 
     /// <summary>
-    /// A deterministic handle for an id-less delayed raise/send — without one it could never be
-    /// cancelled on teardown. xstate v6 <c>updateLogicalTimers</c> mints the same shape.
+    /// The sequence number of an id-less delayed raise/send, so it can still be fired and
+    /// cancelled by key. Built-in <c>after</c>/<c>timeout</c> timers get none: their event is
+    /// their identity (xstate v6 <c>updateLogicalTimers</c>).
     /// </summary>
-    private static string MintTimerId(Run run) => $"xstate.timer.auto.{run.NextTimerId++}";
+    private static int? NextSeq(Run run, string? id, MachineEvent evt) =>
+        id is null && evt is not (AfterEvent or TimeoutEvent or ActorTimeoutEvent)
+            ? run.NextTimerId++
+            : null;
 
     /// <summary>
-    /// Adds a timer to the ledger. Scheduling over an outstanding id replaces it
-    /// (setTimeout-by-key), and the replacement is preceded by the cancel of the timer it
-    /// supersedes — the same way re-entering a state cancels and reschedules its `after` timers.
+    /// Adds a timer to the ledger. Scheduling over an outstanding key replaces that timer in
+    /// place, keeping its position, without a cancel: the host re-keys its schedule
+    /// (xstate v6 <c>updateLogicalTimers</c>).
     /// </summary>
     private static void ScheduleTimer(Run run, LogicalTimer timer)
     {
-        if (run.Timers.RemoveAll(t => t.Id == timer.Id) > 0)
+        var index = run.Timers.FindIndex(timer.Key.Matches);
+        if (index >= 0)
         {
-            run.Effects.Add(new CancelEffect(timer.Id));
+            run.Timers[index] = timer;
         }
-
-        run.Timers.Add(timer);
+        else
+        {
+            run.Timers.Add(timer);
+        }
     }
 
     /// <summary>
@@ -1283,7 +1287,7 @@ public sealed partial class StateMachine<TContext>
                     break;
 
                 case CancelAction<TContext> cancel:
-                    Emit(run, new CancelEffect(cancel.SendIdResolver(args)));
+                    Emit(run, new CancelEffect(cancel.KeyResolver(args)));
                     break;
 
                 case LogAction<TContext> log:
@@ -1396,7 +1400,7 @@ public sealed partial class StateMachine<TContext>
             // v6 compiles `after` into an entry-time `enq.raise(event, { id, delay })` and an
             // exit-time `enq.cancel(id)`, so a delayed transition is a delayed *raise*: when it
             // fires the event lands on the internal queue of the state that scheduled it.
-            Emit(run, new RaiseEffect(afterEvent, afterEvent.SendId, resolved));
+            Emit(run, new RaiseEffect(afterEvent, null, resolved));
         }
 
         // A state-level `timeout` is its own event category, so it can never collide with an
@@ -1406,7 +1410,7 @@ public sealed partial class StateMachine<TContext>
         {
             Emit(run, new RaiseEffect(
                 new TimeoutEvent(node.Id),
-                node.TimeoutSendId,
+                null,
                 node.Timeout.Resolve(args)));
         }
     }
@@ -1415,7 +1419,7 @@ public sealed partial class StateMachine<TContext>
     {
         for (var i = 0; i < node.After.Count; i++)
         {
-            Emit(run, new CancelEffect(new AfterEvent(node.AfterKeys[i], node.Id).SendId));
+            Emit(run, new CancelEffect(new TimerKey.ByEvent(new AfterEvent(node.AfterKeys[i], node.Id))));
         }
     }
 

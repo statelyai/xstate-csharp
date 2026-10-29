@@ -189,9 +189,6 @@ public sealed class InvokeDefinition<TContext>
     /// A non-empty list is what sets <see cref="SpawnEffect.SyncSnapshot"/>.
     /// </summary>
     public IReadOnlyList<TransitionDefinition<TContext>> OnSnapshot { get; internal set; } = [];
-
-    /// <summary>Timer id of this invoke's timeout (<c>xstate.timeout.actor.{invokeId}</c>).</summary>
-    public string TimeoutSendId => $"xstate.timeout.actor.{Id}";
 }
 
 /// <summary>
@@ -252,9 +249,6 @@ public sealed class StateNode<TContext>
 
     /// <summary>Transitions taken on this state's own <c>xstate.timeout</c>.</summary>
     public IReadOnlyList<TransitionDefinition<TContext>> OnTimeout { get; internal set; } = [];
-
-    /// <summary>Timer id of this state's timeout (<c>xstate.timeout.{stateId}</c>).</summary>
-    public string TimeoutSendId => $"xstate.timeout.{Id}";
 
     public IReadOnlyList<ActionDefinition<TContext>> Entry { get; internal set; } = [];
     public IReadOnlyList<ActionDefinition<TContext>> Exit { get; internal set; } = [];

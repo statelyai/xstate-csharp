@@ -20,7 +20,7 @@ public class DurableContractTests
         Assert.Equal("xstate.init", new InitEvent().Type);
         Assert.Equal("xstate.stop", new StopEvent().Type);
         Assert.Equal("xstate.timeout.state", new TimeoutEvent("s").Type);
-        Assert.Equal("xstate.timer", new TimerEvent("t").Type);
+        Assert.Equal("xstate.timer", new TimerEvent(new TimerKey.ById("t")).Type);
     }
 
     [Fact]
@@ -30,7 +30,7 @@ public class DurableContractTests
         Assert.Equal("@xstate.start", new StartEffect("a").Kind);
         Assert.Equal("@xstate.raise", new RaiseEffect(new Ping(), "t", TimeSpan.Zero).Kind);
         Assert.Equal("@xstate.sendTo", new SendToEffect("a", new Ping()).Kind);
-        Assert.Equal("@xstate.cancel", new CancelEffect("t").Kind);
+        Assert.Equal("@xstate.cancel", new CancelEffect(new TimerKey.ById("t")).Kind);
         Assert.Equal("@xstate.stop", new StopChildEffect("a").Kind);
         Assert.Equal("@xstate.terminate", new TerminateEffect(SnapshotStatus.Done, null, null).Kind);
         Assert.Equal("@xstate.deadLetter", new DeadLetterEffect(new Ping(), "stopped").Kind);
@@ -53,17 +53,17 @@ public class DurableContractTests
             .Build();
 
         var initial = machine.GetInitialState();
-        var timerId = Assert.Single(initial.Effects.OfType<RaiseEffect>()).Id!;
-        Assert.True(initial.State.Timers.ContainsKey(timerId));
+        var timerKey = Assert.Single(initial.State.Timers).Key;
+        Assert.Contains(initial.State.Timers, t => t.Key == timerKey);
 
         // Leaving the state cancels its `after` timer, on the ledger and at the host.
         var left = machine.Transition(initial.State, new Go());
         Assert.Empty(left.State.Timers);
-        Assert.Contains(left.Effects, e => e is CancelEffect c && c.SendId == timerId);
+        Assert.Contains(left.Effects, e => e is CancelEffect c && c.Key == timerKey);
 
         // A cancel always races the firing: the host may report a timer it has already been told
         // to drop. The machine is the authority, so the stale firing changes nothing.
-        var stale = machine.Transition(left.State, new TimerEvent(timerId));
+        var stale = machine.Transition(left.State, new TimerEvent(timerKey));
         Assert.Same(left.State, stale.State);
         Assert.Empty(stale.Effects);
         Assert.True(stale.State.Matches("elsewhere"));
@@ -79,9 +79,9 @@ public class DurableContractTests
             .Build();
 
         var initial = machine.GetInitialState();
-        var timerId = Assert.Single(initial.Effects.OfType<RaiseEffect>()).Id!;
+        var timerKey = Assert.Single(initial.State.Timers).Key;
 
-        var fired = machine.Transition(initial.State, new TimerEvent(timerId));
+        var fired = machine.Transition(initial.State, new TimerEvent(timerKey));
 
         Assert.True(fired.State.Matches("late"));
         Assert.Empty(fired.State.Timers);
@@ -101,11 +101,11 @@ public class DurableContractTests
 
         var scheduled = machine.Transition(machine.GetInitialState().State, new Go());
 
-        var timer = Assert.Single(scheduled.State.Timers.Values);
+        var timer = Assert.Single(scheduled.State.Timers);
         Assert.Equal(TimerKind.SendTo, timer.Kind);
         Assert.Equal("peer", timer.Target);
 
-        var fired = machine.Transition(scheduled.State, new TimerEvent("later"));
+        var fired = machine.Transition(scheduled.State, new TimerEvent(new TimerKey.ById("later")));
 
         var send = Assert.Single(fired.Effects.OfType<SendToEffect>());
         Assert.Equal("peer", send.Target);
@@ -283,11 +283,11 @@ public class DurableContractTests
             .Build();
 
         var initial = machine.GetInitialState();
-        var timerId = Assert.Single(initial.Effects.OfType<RaiseEffect>()).Id!;
+        var timerKey = Assert.Single(initial.State.Timers).Key;
 
         // `xstate.timer` is the host telling the machine its own timer elapsed; rejecting it
         // would strand the timer on the ledger forever.
-        var fired = machine.Transition(initial.State, new TimerEvent(timerId));
+        var fired = machine.Transition(initial.State, new TimerEvent(timerKey));
 
         Assert.True(fired.State.Matches("late"));
         Assert.Empty(fired.Effects.OfType<DeadLetterEffect>());
@@ -310,7 +310,7 @@ public class DurableContractTests
             .Build();
 
         var initial = machine.GetInitialState();
-        var timerId = Assert.Single(initial.Effects.OfType<RaiseEffect>()).Id!;
+        var timerKey = Assert.Single(initial.State.Timers).Key;
 
         var stopped = machine.Stop(initial.State);
 
@@ -319,7 +319,7 @@ public class DurableContractTests
         Assert.Empty(stopped.State.Children);
         Assert.Empty(stopped.State.Timers);
 
-        Assert.Contains(stopped.Effects, e => e is CancelEffect c && c.SendId == timerId);
+        Assert.Contains(stopped.Effects, e => e is CancelEffect c && c.Key == timerKey);
         Assert.Contains(stopped.Effects, e => e is StopChildEffect { ChildId: "kid" });
 
         // Stopping is not a terminal *outcome*: there is nothing to report to a parent.
