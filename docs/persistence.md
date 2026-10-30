@@ -225,10 +225,9 @@ state.
 ## What throws, and why
 
 Restoring is a *pure* API, and it refuses rather than guesses. Unlike v6 — which swallows restore
-errors and reports a failed actor — every one of these surfaces as an
-`InvalidOperationException` at the call site — an `InvalidSnapshotException` (v6
-`InvalidSnapshotError`) when the snapshot itself is malformed, where the host can decide what to do with a snapshot
-it cannot use. One exception is different: without a `ContextConverter`, `Restore` casts
+errors and reports a failed actor — every one of these throws at the call site. A malformed
+snapshot throws `InvalidSnapshotException` (v6 `InvalidSnapshotError`); any other restore failure
+throws `InvalidOperationException`. The host decides what to do with a snapshot it cannot use. One exception is different: without a `ContextConverter`, `Restore` casts
 `snapshot.Context` straight to `TContext`, and a context that came through a serializer (a
 `JsonElement`, a dictionary) fails that cast with an `InvalidCastException`. Pass a
 `ContextConverter` for any snapshot that was not persisted in-process.

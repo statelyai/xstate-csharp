@@ -376,6 +376,9 @@ internal sealed class SerializedActorRefConverter : JsonConverter<SerializedActo
 /// <summary>Reads/writes <see cref="PersistedSnapshot.Children"/> as an object keyed by child id.</summary>
 internal sealed class PersistedChildMapConverter : JsonConverter<IReadOnlyList<PersistedChild>>
 {
+    // A JSON null must reach Read so it is rejected like any other wrong shape.
+    public override bool HandleNull => true;
+
     public override IReadOnlyList<PersistedChild> Read(
         ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
@@ -617,6 +620,9 @@ internal sealed class PersistedTimerConverter : JsonConverter<PersistedTimer>
 /// <summary>Reads/writes <see cref="PersistedSnapshot.HistoryValue"/> as v6 <c>{ [historyId]: [{ "id": … }] }</c>.</summary>
 internal sealed class PersistedHistoryConverter : JsonConverter<IReadOnlyDictionary<string, IReadOnlyList<string>>>
 {
+    // A JSON null must reach Read so it is rejected like any other wrong shape.
+    public override bool HandleNull => true;
+
     public override IReadOnlyDictionary<string, IReadOnlyList<string>> Read(
         ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {

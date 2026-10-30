@@ -192,7 +192,11 @@ public class PersistedSnapshotJsonTests
         { "bad timer target", """{"status":"active","value":"shop","context":null,"children":{},"timers":[{"delay":1,"type":"@xstate.raise","event":{"type":"e"},"target":{"type":"sibling"}}],"historyValue":{}}""" },
         { "unknown child target", """{"status":"active","value":"shop","context":null,"children":{},"timers":[{"delay":1,"type":"@xstate.sendTo","event":{"type":"e"},"target":"ghost"}],"historyValue":{}}""" },
         { "machine without version", """{"status":"active","value":"shop","context":null,"children":{},"timers":[],"historyValue":{},"machine":{"id":"job"}}""" },
-        { "bad history", """{"status":"active","value":"shop","context":null,"children":{},"timers":[],"historyValue":{"h":["id"]}}""" }
+        { "bad history", """{"status":"active","value":"shop","context":null,"children":{},"timers":[],"historyValue":{"h":["id"]}}""" },
+        { "null children", """{"status":"active","value":"shop","context":null,"children":null,"timers":[],"historyValue":{}}""" },
+        { "null timers", """{"status":"active","value":"shop","context":null,"children":{},"timers":null,"historyValue":{}}""" },
+        { "null history", """{"status":"active","value":"shop","context":null,"children":{},"timers":[],"historyValue":null}""" },
+        { "null counters", """{"status":"active","value":"shop","context":null,"children":{},"timers":[],"historyValue":{},"_nextActorIds":null}""" }
     };
 
     [Theory]

@@ -91,7 +91,7 @@ internal static class MachineResolver
         {
             throw new InvalidOperationException(
                 $"State key \"{builder.Key}\" contains \".\" — nest the states or escape it as " +
-                $"\"{System.Text.RegularExpressions.Regex.Replace(builder.Key, @"(?<!\\)\.", @"\\.")}\".");
+                $"\"{System.Text.RegularExpressions.Regex.Replace(builder.Key, @"(?<!\\)\.", @"\.")}\".");
         }
 
         // Ids compose from the *key path* from the machine root, prefixed by the machine id when

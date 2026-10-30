@@ -213,6 +213,7 @@ public sealed record PersistedSnapshot
 
     /// <summary>Generated-actor-id counters per prefix (<see cref="State{TContext}.NextActorIds"/>).</summary>
     [JsonPropertyName("_nextActorIds"), JsonPropertyOrder(10)]
+    [JsonConverter(typeof(PersistedCounterMapConverter))]
     public IReadOnlyDictionary<string, int> NextActorIds { get; init; } =
         new Dictionary<string, int>(StringComparer.Ordinal);
 
@@ -277,6 +278,9 @@ public static class PersistedStatus
 /// </summary>
 internal sealed class PersistedTimerListConverter : JsonConverter<IReadOnlyList<PersistedTimer>>
 {
+    // A JSON null must reach Read so it is rejected like any other wrong shape.
+    public override bool HandleNull => true;
+
     public override IReadOnlyList<PersistedTimer> Read(
         ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
@@ -312,5 +316,33 @@ internal sealed class PersistedTimerListConverter : JsonConverter<IReadOnlyList<
         }
 
         writer.WriteEndArray();
+    }
+}
+
+/// <summary>Reads <c>_nextActorIds</c>, rejecting <c>null</c> and non-object shapes as malformed.</summary>
+internal sealed class PersistedCounterMapConverter : JsonConverter<IReadOnlyDictionary<string, int>>
+{
+    public override bool HandleNull => true;
+
+    public override IReadOnlyDictionary<string, int> Read(
+        ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType is not JsonTokenType.StartObject)
+        {
+            throw new InvalidSnapshotException("Persisted '_nextActorIds' must be an object of prefix → counter.");
+        }
+
+        return JsonSerializer.Deserialize<Dictionary<string, int>>(ref reader, options)
+               ?? throw new InvalidSnapshotException("Persisted '_nextActorIds' must be an object of prefix → counter.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, IReadOnlyDictionary<string, int> value, JsonSerializerOptions options)
+    {
+        writer.WriteStartObject();
+        foreach (var (prefix, next) in value)
+        {
+            writer.WriteNumber(prefix, next);
+        }
+        writer.WriteEndObject();
     }
 }

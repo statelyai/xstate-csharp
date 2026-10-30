@@ -162,7 +162,9 @@ public sealed class JournalingHost : IDurableHost
         _ = Task.Delay(delay, cts.Token).ContinueWith(
             task =>
             {
-                if (task.IsCompletedSuccessfully)
+                // A firing queued just before this alarm was replaced or cancelled must not reach
+                // the machine: the key may now name a rescheduled timer and would fire it early.
+                if (task.IsCompletedSuccessfully && !cts.IsCancellationRequested)
                 {
                     _mailbox.Writer.TryWrite(new TimerEvent(key));
                 }

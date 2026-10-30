@@ -101,7 +101,7 @@ public sealed class StateIdentityTests
             .State("foo.bar")
             .Build());
 
-        Assert.Equal("State key \"foo.bar\" contains \".\" — nest the states or escape it as \"foo\\\\.bar\".", error.Message);
+        Assert.Equal("State key \"foo.bar\" contains \".\" — nest the states or escape it as \"foo\\.bar\".", error.Message);
     }
 
     [Fact]
