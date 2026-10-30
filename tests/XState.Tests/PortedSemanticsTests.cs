@@ -24,7 +24,7 @@ public class PortedSemanticsTests
     {
         var tracked = new List<string>();
 
-        var machine = Machine.Create("(machine)")
+        var machine = Machine.Create("")
             .Root(r => r.Entry(_ => tracked.Add("enter: __root__")))
             .Initial("a")
             .State("a", s => s
@@ -34,7 +34,7 @@ public class PortedSemanticsTests
                     .Entry(_ => tracked.Add("enter: a.a1"))
                     .On("NEXT", t => t.Target("a2")))
                 .State("a2")
-                .On("CHANGE", t => t.Target("#(machine).b")))
+                .On("CHANGE", t => t.Target("#b")))
             .State("b")
             .Build();
 
@@ -48,7 +48,7 @@ public class PortedSemanticsTests
     {
         var tracked = new List<string>();
 
-        var machine = Machine.Create("(machine)")
+        var machine = Machine.Create("")
             .Root(r => r
                 .AsParallel()
                 .Entry(_ => tracked.Add("enter: __root__")))
@@ -640,7 +640,7 @@ public class PortedSemanticsTests
         var machine = Machine.Create("test")
             .Initial("p")
             .Parallel("p", p => p
-                .On("xstate.done.state.test.p", t => t.Target("#test.success"))
+                .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "test.p").Target("#test.success"))
                 .State("a", r => r
                     .Initial("idle")
                     .State("idle", c => c.On("FINISH", t => t.Target("finished")))
@@ -669,7 +669,7 @@ public class PortedSemanticsTests
             .Initial("parallelSteps")
             .Parallel("parallelSteps", p => p
                 .History("hist")
-                .On("xstate.done.state.hist-done.parallelSteps", t => t.Target("#hist-done.finished"))
+                .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "hist-done.parallelSteps").Target("#hist-done.finished"))
                 .State("one", r => r
                     .Initial("wait_one")
                     .State("wait_one", c => c.On("finish_one", t => t.Target("done")))
@@ -696,7 +696,7 @@ public class PortedSemanticsTests
         var machine = Machine.Create("aggregate")
             .Initial("processing")
             .Parallel("processing", p => p
-                .On("xstate.done.state.aggregate.processing", t => t
+                .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "aggregate.processing")
                     .Do(a => output = ((DoneStateEvent)a.Event).Output)
                     .Target("#aggregate.success"))
                 .State("upload", r => r
@@ -728,7 +728,7 @@ public class PortedSemanticsTests
         var machine = Machine.Create("partial")
             .Initial("p")
             .Parallel("p", p => p
-                .On("xstate.done.state.partial.p", t => t
+                .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "partial.p")
                     .Do(a => output = ((DoneStateEvent)a.Event).Output)
                     .Target("#partial.success"))
                 .State("withOutput", r => r
@@ -758,7 +758,7 @@ public class PortedSemanticsTests
         var machine = Machine.Create("nested-agg")
             .Initial("outer")
             .Parallel("outer", p => p
-                .On("xstate.done.state.nested-agg.outer", t => t
+                .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "nested-agg.outer")
                     .Do(a => output = ((DoneStateEvent)a.Event).Output)
                     .Target("#nested-agg.success"))
                 .State("branch1", r => r
@@ -1104,7 +1104,7 @@ public class PortedSemanticsTests
         var machine = Machine.Create("m")
             .Initial("foo")
             .Parallel("foo", p => p
-                .On("xstate.done.state.m.foo", t => t
+                .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "m.foo")
                     .Do(a => doneEventType = a.Event.Type)
                     .Target("#m.bar"))
                 .State("first", r => r
@@ -1135,7 +1135,7 @@ public class PortedSemanticsTests
             .Context(_ => new Counter(0))
             .Initial("a")
             .State("a", s => s
-                .On("xstate.done.state.ctx-output.a", t => t
+                .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "ctx-output.a")
                     .Do(x => seen = ((DoneStateEvent)x.Event).Output))
                 .Initial("a1")
                 .State("a1", c => c.On("NEXT", t => t.Target("a2")))
@@ -1157,10 +1157,10 @@ public class PortedSemanticsTests
         var machine = Machine.Create("final-order")
             .Initial("foo")
             .State("foo", s => s
-                .On("xstate.done.state.final-order.foo", t => t.Do(_ => actual.Add("fooAction")))
+                .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "final-order.foo").Do(_ => actual.Add("fooAction")))
                 .Initial("bar")
                 .State("bar", r => r
-                    .On("xstate.done.state.final-order.foo.bar", t => t.Target("barFinal"))
+                    .On<DoneStateEvent>(t => t.Guard(a => a.Event.StateId == "final-order.foo.bar").Target("barFinal"))
                     .Initial("baz")
                     .Final("baz", c => c.Entry(_ => actual.Add("bazAction"))))
                 .Final("barFinal", r => r.Entry(_ => actual.Add("barAction"))))

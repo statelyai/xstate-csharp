@@ -65,7 +65,7 @@ references become addresses.
 | `SpawnEffect` / `StartEffect` | `@xstate.spawn`, `@xstate.start` | Create a child; start it at the end of the macrostep. |
 | `StopChildEffect` | `@xstate.stop` | Stop a child. |
 | `RaiseEffect` / `SendToEffect` | `@xstate.raise`, `@xstate.sendTo` | Delayed self-raise; send to another actor, now or delayed. |
-| `CancelEffect` | `@xstate.cancel` | Cancel a logical timer by id. |
+| `CancelEffect` | `@xstate.cancel` | Cancel a logical timer by `TimerKey` (id, seq or event). |
 | `TerminateEffect` | `@xstate.terminate` | Actor reached `Done` or `Error`; relay to the parent. |
 | `DeadLetterEffect` | `@xstate.deadLetter` | Event rejected at the boundary, never delivered. |
 | `EmitEffect` | `emit` | Emit an event to subscribers. |
@@ -104,7 +104,8 @@ other operation throws by name rather than quietly running local behaviour.
 
 Persistence is pure: `machine.Persist(state)` yields plain data, and `machine.Restore(persisted)`
 returns the snapshot plus the children and timers the machine expects but cannot re-create.
-Restore refuses a snapshot from a different machine or version.
+Restore refuses a snapshot from a different machine or version. `SnapshotJson` reads and writes
+xstate v6's `persisted-snapshot/v1` JSON.
 
 - [`docs/durable-hosts.md`](docs/durable-hosts.md): host contract (identity, timers, effect ids, journaling, determinism, checkpoints)
 - [`docs/persistence.md`](docs/persistence.md): persist/restore, JSON, versions and migrations
@@ -137,7 +138,7 @@ var machine = MachineConfig.FromJson(json, new MachineImplementations<JsonElemen
 
 The reader follows the v6 `machine.schema.json`: `params`, `meta`, `description`, `version`,
 `timeout`/`onTimeout`, `onError`, `onSnapshot`, state and transition `input`, root `actions`/`guards`
-maps, built-in `@xstate.raise`/`cancel`/`log`/`emit`/`assign` actions, and `xstate.stateIn`/`xstate.not`
+maps, built-in `@xstate.raise`/`cancel`/`log`/`emit`/`assign` actions, and `@xstate.stateIn`/`@xstate.not`
 guards. Unknown keys throw with their JSON path (relax with `JsonConfigOptions.IgnoreUnknownKeys`).
 Keys v6 defines but the port cannot honour (`route`, `matches`, `@expr`, non-empty `schemas`)
 throw `NotSupportedException`. `MachineConfig.ToJson(machine)` returns the source config verbatim

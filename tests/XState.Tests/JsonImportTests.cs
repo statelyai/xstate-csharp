@@ -264,9 +264,7 @@ public class JsonImportTests
               "states": {
                 "work": {
                   "type": "parallel",
-                  "on": {
-                    "xstate.done.state.agg.work": { "target": "success", "actions": "capture" }
-                  },
+                  "onDone": { "target": "success", "actions": "capture" },
                   "states": {
                     "upload": {
                       "initial": "pending",
@@ -788,6 +786,43 @@ public class JsonImportTests
     }
 
     [Fact]
+    public void Cancel_accepts_a_seq_or_a_built_in_timer_event()
+    {
+        var machine = MachineConfig.FromJson(
+            """
+            {
+              "id": "keys",
+              "initial": "a",
+              "states": {
+                "a": {
+                  "entry": [{ "type": "@xstate.raise", "event": { "type": "LATE" }, "delay": 500 }],
+                  "after": { "1000": "b" },
+                  "on": {
+                    "BY_SEQ": { "actions": [{ "type": "@xstate.cancel", "seq": 0 }] },
+                    "BY_EVENT": {
+                      "actions": [{
+                        "type": "@xstate.cancel",
+                        "event": { "type": "xstate.after", "delay": 1000, "stateId": "keys.a" }
+                      }]
+                    }
+                  }
+                },
+                "b": {}
+              }
+            }
+            """);
+
+        var initial = machine.GetInitialState();
+        Assert.Equal(2, initial.State.Timers.Count);
+
+        var bySeq = machine.Transition(initial.State, Ev("BY_SEQ"));
+        Assert.IsType<AfterEvent>(Assert.Single(bySeq.State.Timers).Event);
+
+        var byEvent = machine.Transition(bySeq.State, Ev("BY_EVENT"));
+        Assert.Empty(byEvent.State.Timers);
+    }
+
+    [Fact]
     public void The_built_in_raise_action_honours_a_delay_and_an_id_that_cancel_can_name()
     {
         var machine = MachineConfig.FromJson(
@@ -819,7 +854,7 @@ public class JsonImportTests
         Assert.Equal("LATE", raise.Event.Type);
 
         var disarmed = machine.Transition(armed.State, Ev("DISARM"));
-        Assert.Equal("armed", Assert.Single(disarmed.Effects.OfType<CancelEffect>()).SendId);
+        Assert.Equal("armed", ((TimerKey.ById)Assert.Single(disarmed.Effects.OfType<CancelEffect>()).Key).Id);
     }
 
     [Fact]
@@ -895,7 +930,7 @@ public class JsonImportTests
             """);
 
         var effect = Assert.Single(
-            machine.GetInitialState().Effects.OfType<ActionEffect>(), e => e.Type == "xstate.log");
+            machine.GetInitialState().Effects.OfType<ActionEffect>(), e => e.Type == "@xstate.log");
         var @params = Assert.IsType<LogParams>(effect.Params);
 
         Assert.Equal("hello", Assert.IsType<JsonElement>(@params.Message).GetString());
@@ -1078,11 +1113,11 @@ public class JsonImportTests
                         "GO": [
                           {
                             "target": "allowed",
-                            "guard": { "type": "xstate.stateIn", "params": { "stateId": "#ready" } }
+                            "guard": { "type": "@xstate.stateIn", "params": { "stateId": "#ready" } }
                           },
                           {
                             "target": "denied",
-                            "guard": { "type": "xstate.not", "params": { "guard": { "type": "never" } } }
+                            "guard": { "type": "@xstate.not", "params": { "guard": { "type": "never" } } }
                           }
                         ]
                       }
@@ -1101,7 +1136,7 @@ public class JsonImportTests
         var machine = MachineConfig.FromJson(Config, Impls());
         Assert.True(machine.Transition(machine.GetInitialState().State, Ev("GO")).State.Matches("right.allowed"));
 
-        // With the left region elsewhere, `xstate.stateIn` fails and `xstate.not(never)` wins.
+        // With the left region elsewhere, `@xstate.stateIn` fails and `@xstate.not(never)` wins.
         var moved = MachineConfig.FromJson(Config.Replace("\"initial\": \"idle\"", "\"initial\": \"busy\""), Impls());
         Assert.True(moved.Transition(moved.GetInitialState().State, Ev("GO")).State.Matches("right.denied"));
     }

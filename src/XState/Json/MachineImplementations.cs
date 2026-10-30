@@ -36,36 +36,42 @@ public sealed class MachineImplementations<TContext>
 
     public MachineImplementations<TContext> Guard(string name, Guard<TContext> guard)
     {
+        ReservedNames.AssertUnreservedSourceName("guard", name);
         Guards[name] = guard;
         return this;
     }
 
     public MachineImplementations<TContext> Action(string name, ActionDefinition<TContext> action)
     {
+        ReservedNames.AssertUnreservedSourceName("action", name);
         Actions[name] = action with { Name = name };
         return this;
     }
 
     public MachineImplementations<TContext> Action(string name, Action<ActionArgs<TContext>> action)
     {
+        ReservedNames.AssertUnreservedSourceName("action", name);
         Actions[name] = new CustomAction<TContext>(action) { Name = name };
         return this;
     }
 
     public MachineImplementations<TContext> ActorLogic(string name, IActorLogic logic)
     {
+        ReservedNames.AssertUnreservedSourceName("actor", name);
         Actors[name] = logic;
         return this;
     }
 
     public MachineImplementations<TContext> Delay(string name, DelayRef<TContext> delay)
     {
+        ReservedNames.AssertUnreservedSourceName("delay", name);
         Delays[name] = delay;
         return this;
     }
 
     public MachineImplementations<TContext> Delay(string name, TimeSpan delay)
     {
+        ReservedNames.AssertUnreservedSourceName("delay", name);
         Delays[name] = new DelayRef<TContext>(_ => delay, name);
         return this;
     }

@@ -220,6 +220,7 @@ internal sealed class JsonMachineReader<TContext>
         {
             foreach (var entry in on.EnumerateObject())
             {
+                ReservedNames.AssertNotObsoleteEventType(entry.Name);
                 var descriptor = new EventDescriptor.ByPattern(entry.Name);
                 state.Transitions.AddRange(
                     ReadTransitions(entry.Value, $"{path}.on.{entry.Name}", descriptor));
@@ -518,15 +519,17 @@ internal sealed class JsonMachineReader<TContext>
     {
         var (name, @params) = ReadReference(element, "Guard", path);
 
-        if (name.StartsWith("@xstate.", StringComparison.Ordinal))
+        if (name is not ("@xstate.stateIn" or "@xstate.not") &&
+            (name.StartsWith("@xstate.", StringComparison.Ordinal) ||
+             name.StartsWith("xstate.", StringComparison.Ordinal)))
         {
             throw new NotSupportedException(
-                $"Guard type '{name}' at {path} in machine '{_machineId}' uses the reserved " +
-                "'@xstate.' prefix.");
+                $"Guard type '{name}' at {path} in machine '{_machineId}' uses a reserved " +
+                "'xstate.'/'@xstate.' prefix; the built-in guards are '@xstate.stateIn' and '@xstate.not'.");
         }
 
         if (_guardDefinitions.ContainsKey(name) ||
-            name is "xstate.stateIn" or "xstate.not")
+            name is "@xstate.stateIn" or "@xstate.not")
         {
             draft.Guard = CompileGuard(element, path, []);
             return;
@@ -544,8 +547,8 @@ internal sealed class JsonMachineReader<TContext>
     }
 
     /// <summary>
-    /// Compiles a guard reference to a predicate: the built-ins <c>xstate.stateIn</c> /
-    /// <c>xstate.not</c> (createMachineFromConfig.ts:1060-1079), a machine-level
+    /// Compiles a guard reference to a predicate: the built-ins <c>@xstate.stateIn</c> /
+    /// <c>@xstate.not</c> (createMachineFromConfig.ts:1060-1079), a machine-level
     /// <c>guards: { name: { when } }</c> definition, or a named implementation.
     /// </summary>
     private Guard<TContext> CompileGuard(JsonElement element, string path, List<string> stack)
@@ -554,21 +557,21 @@ internal sealed class JsonMachineReader<TContext>
 
         switch (name)
         {
-            case "xstate.stateIn":
+            case "@xstate.stateIn":
             {
                 var stateId = JsonConfig.GetString(@params ?? default, "stateId")
                               ?? throw new InvalidOperationException(
-                                  $"'xstate.stateIn' at {path} in machine '{_machineId}' requires " +
+                                  $"'@xstate.stateIn' at {path} in machine '{_machineId}' requires " +
                                   "params.stateId.");
                 return args => args.In(stateId);
             }
 
-            case "xstate.not":
+            case "@xstate.not":
             {
                 if (@params is not { } p || !JsonConfig.TryProp(p, "guard", out var inner))
                 {
                     throw new InvalidOperationException(
-                        $"'xstate.not' at {path} in machine '{_machineId}' requires params.guard.");
+                        $"'@xstate.not' at {path} in machine '{_machineId}' requires params.guard.");
                 }
 
                 var negated = CompileGuard(inner, $"{path}.params.guard", stack);
@@ -713,10 +716,8 @@ internal sealed class JsonMachineReader<TContext>
 
             case "@xstate.cancel":
             {
-                var id = JsonConfig.GetString(element, "id")
-                         ?? throw new InvalidOperationException(
-                             $"'@xstate.cancel' at {path} in machine '{_machineId}' requires an 'id'.");
-                return new CancelAction<TContext>(_ => id) { Name = type };
+                var key = ReadCancelKey(element, path);
+                return new CancelAction<TContext>(_ => key) { Name = type };
             }
 
             case "@xstate.log":
@@ -773,6 +774,46 @@ internal sealed class JsonMachineReader<TContext>
 
         return new AssignAction<TContext>(args =>
             (TContext)(object)JsonConfig.Merge((JsonElement)(object)args.Context!, patch));
+    }
+
+    /// <summary>
+    /// The <see cref="TimerKey"/> of an <c>@xstate.cancel</c>: <c>id</c>, <c>seq</c> or
+    /// <c>event</c> (v6 <c>readTimerKey</c>). A built-in timer event is read as its typed event
+    /// so it matches the <c>after</c>/<c>timeout</c> timer it names.
+    /// </summary>
+    private TimerKey ReadCancelKey(JsonElement element, string path)
+    {
+        if (JsonConfig.GetString(element, "id") is { } id)
+        {
+            return new TimerKey.ById(id);
+        }
+
+        if (JsonConfig.TryProp(element, "seq", out var seq) && seq.ValueKind is JsonValueKind.Number)
+        {
+            return new TimerKey.BySeq(seq.GetInt32());
+        }
+
+        if (JsonConfig.TryProp(element, "event", out _))
+        {
+            var evt = ReadEvent(element, $"{path}.event");
+            var data = ((NamedEvent)evt).Data is JsonElement d ? d : default;
+            string? Field(string name) => data.ValueKind is JsonValueKind.Object &&
+                                          data.TryGetProperty(name, out var v)
+                ? v.ValueKind is JsonValueKind.String ? v.GetString() : v.GetRawText()
+                : null;
+
+            return new TimerKey.ByEvent(evt.Type switch
+            {
+                "xstate.after" when Field("stateId") is { } s && Field("delay") is { } delay =>
+                    new AfterEvent(delay, s),
+                "xstate.timeout.state" when Field("stateId") is { } s => new TimeoutEvent(s),
+                "xstate.timeout.actor" when Field("actorId") is { } a => new ActorTimeoutEvent(a),
+                _ => evt
+            });
+        }
+
+        throw new InvalidOperationException(
+            $"'@xstate.cancel' at {path} in machine '{_machineId}' requires an 'id', 'seq' or 'event'.");
     }
 
     private MachineEvent ReadEvent(JsonElement owner, string path)
@@ -912,6 +953,7 @@ internal sealed class JsonMachineReader<TContext>
         {
             foreach (var entry in actions.EnumerateObject())
             {
+                ReservedNames.AssertUnreservedSourceName("actions", entry.Name);
                 _actionDefinitions[entry.Name] = entry.Value.Clone();
             }
         }
@@ -920,6 +962,7 @@ internal sealed class JsonMachineReader<TContext>
         {
             foreach (var entry in guards.EnumerateObject())
             {
+                ReservedNames.AssertUnreservedSourceName("guards", entry.Name);
                 JsonSchemaKeys.Validate(
                     entry.Value, $"$.guards.{entry.Name}", JsonSchemaKeys.GuardDefinition, _machineId, _options);
 
@@ -945,6 +988,7 @@ internal sealed class JsonMachineReader<TContext>
 
         foreach (var entry in delays.EnumerateObject())
         {
+            ReservedNames.AssertUnreservedSourceName("delays", entry.Name);
             var path = $"$.delays.{entry.Name}";
             var value = entry.Value;
 

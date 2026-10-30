@@ -5,7 +5,7 @@ public sealed record LogEntry(string? Label, object? Message);
 
 /// <summary>
 /// A logical timer waiting on the interpreter's virtual clock. The host owns only the clock: when
-/// the timer is due it delivers <see cref="XState.TimerEvent"/> with <see cref="Id"/> back to the
+/// the timer is due it delivers <see cref="XState.TimerEvent"/> with <see cref="Key"/> back to the
 /// actor that scheduled it, and the machine decides what firing means.
 /// </summary>
 public sealed record ScheduledSend(
@@ -14,7 +14,11 @@ public sealed record ScheduledSend(
     string SenderId,
     string? Target,
     MachineEvent Event,
-    string? Id);
+    TimerKey Key)
+{
+    /// <summary>The explicit timer id, when <see cref="Key"/> is one.</summary>
+    public string? Id => (Key as TimerKey.ById)?.Id;
+}
 
 /// <summary>An event a machine rejected at its boundary (<see cref="DeadLetterEffect"/>).</summary>
 public sealed record DeadLetter(string ActorId, MachineEvent Event, string Reason, Exception? Error);
@@ -578,7 +582,7 @@ public sealed class DeterministicInterpreter
             switch (effect)
             {
                 case ActionEffect action:
-                    if (action is { Type: "xstate.log", Params: LogParams log })
+                    if (action is { Type: "@xstate.log", Params: LogParams log })
                     {
                         _log.Add(new LogEntry(log.Label, log.Message));
                     }
@@ -597,11 +601,11 @@ public sealed class DeterministicInterpreter
                     break;
 
                 case RaiseEffect raise:
-                    Schedule(actor, raise.Id, raise.Delay, target: null, raise.Event);
+                    Schedule(actor, TimerKey.For(raise.Id, raise.Seq, raise.Event), raise.Delay, target: null, raise.Event);
                     break;
 
                 case SendToEffect { Delay: not null } send:
-                    Schedule(actor, send.Id, send.Delay.Value, send.Target, send.Event);
+                    Schedule(actor, TimerKey.For(send.Id, send.Seq, send.Event), send.Delay.Value, send.Target, send.Event);
                     break;
 
                 case SendToEffect send:
@@ -609,7 +613,7 @@ public sealed class DeterministicInterpreter
                     break;
 
                 case CancelEffect cancel:
-                    Cancel(actor, cancel.SendId);
+                    Cancel(actor, cancel.Key);
                     break;
 
                 case SpawnEffect spawn:
@@ -668,33 +672,36 @@ public sealed class DeterministicInterpreter
     }
 
     /// <summary>
-    /// Parks a logical timer on the virtual clock. The host tracks only (owner, id, due time):
+    /// Parks a logical timer on the virtual clock. The host tracks only (owner, key, due time):
     /// when it comes due it delivers <see cref="TimerEvent"/> back to the owner, which looks the
-    /// id up in its own ledger.
+    /// key up in its own ledger. Scheduling an already-parked (owner, key) replaces it — the
+    /// machine re-keys a rescheduled timer without a cancel.
     /// </summary>
-    private void Schedule(Actor sender, string? id, TimeSpan delay, string? target, MachineEvent evt)
+    private void Schedule(Actor sender, TimerKey key, TimeSpan delay, string? target, MachineEvent evt)
     {
+        Cancel(sender, key);
         var seq = _seqCounter++;
         _senders[seq] = sender;
-        _scheduled.Add(new ScheduledSend(VirtualTime + delay, seq, sender.Id, target, evt, id));
+        _scheduled.Add(new ScheduledSend(VirtualTime + delay, seq, sender.Id, target, evt, key));
     }
 
-    private void Cancel(Actor sender, string sendId)
+    private void Cancel(Actor sender, TimerKey key)
     {
+        var serialized = key.Serialize();
         _scheduled.RemoveAll(s =>
-            s.Id == sendId && _senders.TryGetValue(s.Seq, out var owner) && ReferenceEquals(owner, sender));
+            s.Key.Serialize() == serialized && _senders.TryGetValue(s.Seq, out var owner) && ReferenceEquals(owner, sender));
     }
 
     private void Deliver(ScheduledSend scheduled)
     {
-        if (!_senders.TryGetValue(scheduled.Seq, out var sender) || !sender.Alive || scheduled.Id is null)
+        if (!_senders.TryGetValue(scheduled.Seq, out var sender) || !sender.Alive)
         {
             return;
         }
 
-        // The host does not decide what a fired timer means — it only reports that the id
+        // The host does not decide what a fired timer means — it only reports that the key
         // elapsed. The machine strikes it off its ledger and turns it into a raise or a send.
-        sender.Mailbox.Enqueue(new TimerEvent(scheduled.Id));
+        sender.Mailbox.Enqueue(new TimerEvent(scheduled.Key));
     }
 
     private void Spawn(Actor parent, SpawnEffect spawn)

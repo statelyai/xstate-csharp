@@ -33,7 +33,7 @@ internal static class MachineJsonWriter
                 json["internalEvents"] = new JsonArray([.. machine.InternalEvents.Select(e => (JsonNode)e!)]);
             }
         }
-        else if (node.Parent is { } parent && node.Id != $"{parent.Path}.{node.Key}")
+        else if (node.HasExplicitId)
         {
             // The id only needs writing when it was set explicitly; otherwise it is the key path.
             json["id"] = node.Id;

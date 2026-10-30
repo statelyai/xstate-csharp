@@ -45,8 +45,10 @@ public sealed record PersistOptions
 /// <param name="Logic">
 /// The logic resolved from the machine's registered <see cref="StateMachine{TContext}.Sources"/>,
 /// or null for a <see cref="Remote"/> child, whose state lives with another runtime and which the
-/// host re-attaches to by <paramref name="Address"/> rather than re-creating.
+/// host re-attaches to by <paramref name="Address"/> rather than re-creating. For an inline invoke
+/// (no <paramref name="Src"/>), the logic of the active invoke definition with this id.
 /// </param>
+/// <param name="SyncSnapshot">Whether the parent observes this child's snapshots.</param>
 public sealed record ChildToRestore(
     string Id,
     string? Src,
@@ -54,7 +56,8 @@ public sealed record ChildToRestore(
     string Incarnation,
     PersistedSnapshot? Snapshot,
     IActorLogic? Logic,
-    bool Remote);
+    bool Remote,
+    bool SyncSnapshot = false);
 
 /// <summary>
 /// What <see cref="StateMachine{TContext}.Restore"/> hands back: the rebuilt snapshot, plus the

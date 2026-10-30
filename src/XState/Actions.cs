@@ -79,9 +79,16 @@ public sealed record SendToAction<TContext>(
     DelayRef<TContext>? Delay = null,
     string? Id = null) : ActionDefinition<TContext>;
 
-/// <summary>Cancel a delayed send by id (SCXML &lt;cancel&gt;).</summary>
-public sealed record CancelAction<TContext>(Func<ActionArgs<TContext>, string> SendIdResolver)
-    : ActionDefinition<TContext>;
+/// <summary>Cancel a delayed raise/send by its <see cref="TimerKey"/> (SCXML &lt;cancel&gt;).</summary>
+public sealed record CancelAction<TContext>(Func<ActionArgs<TContext>, TimerKey> KeyResolver)
+    : ActionDefinition<TContext>
+{
+    /// <summary>Cancel by explicit id (<see cref="TimerKey.ById"/>).</summary>
+    public CancelAction(Func<ActionArgs<TContext>, string> idResolver)
+        : this(args => new TimerKey.ById(idResolver(args)))
+    {
+    }
+}
 
 /// <summary>Log a message (surfaces as the built-in <c>xstate.log</c> action effect).</summary>
 public sealed record LogAction<TContext>(

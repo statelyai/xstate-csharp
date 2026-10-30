@@ -51,7 +51,7 @@ internal static class JsonSchemaKeys
     internal static readonly Dictionary<string, string[]> BuiltInActions = new(StringComparer.Ordinal)
     {
         ["@xstate.raise"] = ["type", "event", "id", "delay"],
-        ["@xstate.cancel"] = ["type", "id"],
+        ["@xstate.cancel"] = ["type", "id", "seq", "event"],
         ["@xstate.log"] = ["type", "args"],
         ["@xstate.emit"] = ["type", "event"],
         ["@xstate.assign"] = ["type", "context"]

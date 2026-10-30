@@ -52,7 +52,8 @@ public sealed partial class StateMachine<TContext> : IMachineLogic
 
     /// <summary>
     /// Hard cap on the microsteps one macrostep may take before the machine is declared to be
-    /// looping (xstate v6 <c>macrostep</c> throws above 1000).
+    /// looping: exceeding it throws <see cref="InfiniteTransitionError"/>. Named
+    /// <c>maxIterations</c> upstream (xstate v6 <c>options.maxIterations</c>, default 1000).
     /// </summary>
     public int MaxMicrosteps { get; init; } = 1000;
 
@@ -85,56 +86,99 @@ public sealed partial class StateMachine<TContext> : IMachineLogic
 
     internal void RegisterNodes(StateNode<TContext> node)
     {
-        RegisterIds(node);
-        RegisterAliases(node);
+        // Valid keys escape their dots, so two implicit ids cannot coincide; an explicit id that
+        // equals another id would make `#id` ambiguous (xstate v6 StateNode.ts).
+        if (_idMap.TryGetValue(node.Id, out var existing))
+        {
+            throw new InvalidOperationException(
+                $"Duplicate state id '{node.Id}': the states at '{KeyPath(existing)}' and '{KeyPath(node)}' both have it. " +
+                "State ids must be unique; rename the explicit `id`.");
+        }
+
+        _idMap[node.Id] = node;
+        foreach (var child in node.Children) RegisterNodes(child);
     }
 
-    private void RegisterIds(StateNode<TContext> node)
+    private static string KeyPath(StateNode<TContext> node) =>
+        node.Parent is null ? "" : node.Parent.Parent is null ? node.Key : $"{KeyPath(node.Parent)}.{node.Key}";
+
+    /// <summary>
+    /// The node whose id is exactly <paramref name="id"/> (an optional leading <c>#</c> is
+    /// stripped). The text is never split into an id plus a path (xstate v6
+    /// <c>getStateNodeById</c>).
+    /// </summary>
+    public StateNode<TContext> GetNodeById(string id)
     {
-        _idMap[node.Id] = node;
-        foreach (var child in node.Children) RegisterIds(child);
+        var hasPrefix = id.StartsWith('#');
+        var key = hasPrefix ? id[1..] : id;
+
+        if (key.Length == 0 && hasPrefix)
+        {
+            throw new ArgumentException(Id.Length > 0
+                ? $"State id '#' is empty. Target the root of {StatePath.DescribeMachine(Id)} with '#{Id}'."
+                : "State id '#' is empty: the root of a machine without an `id` cannot be referenced by id. " +
+                  "Give the machine an `id` to reference its root as '#<id>'.");
+        }
+
+        return _idMap.TryGetValue(key, out var node)
+            ? node
+            : throw new ArgumentException(DescribeUnknownStateId(key));
     }
 
     /// <summary>
-    /// A node with an explicit <c>.Id(...)</c> is still addressable by its key path
-    /// ("machineId.key1.key2"): the explicit id is an additional alias, not a re-rooting.
-    /// Registered after every canonical id, so an explicit id always wins a collision.
+    /// xstate v6 <c>_describeUnknownStateId</c>: when a prefix of the id is a state id and the
+    /// rest resolves beneath it as a relative path, suggests the target's own id.
     /// </summary>
-    private void RegisterAliases(StateNode<TContext> node)
+    private string DescribeUnknownStateId(string id)
     {
-        if (node.Path != node.Id)
+        var message = $"No state has id \"{id}\".";
+        var segments = StatePath.Split(id);
+        for (var i = segments.Count - 1; i > 0; i--)
         {
-            _idMap.TryAdd(node.Path, node);
+            _idMap.TryGetValue(string.Join('.', segments.Take(i)), out var node);
+            for (var j = i; node is not null && j < segments.Count; j++)
+            {
+                node = node.Children.FirstOrDefault(c => c.Key == segments[j]);
+            }
+
+            if (node is not null)
+            {
+                return node.HasExplicitId
+                    ? $"{message} Use \"#{node.Id}\"."
+                    : $"{message} Use \"#{node.Id}\", or give that state an id.";
+            }
         }
 
-        foreach (var child in node.Children) RegisterAliases(child);
+        return message;
     }
-
-    /// <summary>Registers an additional name for a node; never overwrites a canonical id.</summary>
-    internal void RegisterAlias(string alias, StateNode<TContext> node) => _idMap.TryAdd(alias, node);
-
-    public StateNode<TContext> GetNodeById(string id) =>
-        _idMap.TryGetValue(id, out var node)
-            ? node
-            : throw new ArgumentException($"State node '#{id}' not found on machine '{Id}'.");
 
     public bool TryGetNodeById(string id, out StateNode<TContext> node) =>
         _idMap.TryGetValue(id, out node!);
 
     /// <summary>
-    /// Canonical node id for a reference written as a full id, an explicit "#id", or a key path
-    /// relative to the machine root ("a.b"). Null when nothing matches.
+    /// Canonical node id for a reference: <c>"#id"</c> names a whole state id exactly; anything
+    /// else is a full id or a key path relative to the machine root (<c>"a.b"</c>, with
+    /// <c>\.</c> escaping a dot inside a key). Null when nothing matches.
     /// </summary>
     internal string? ResolveStateId(string reference)
     {
-        var key = reference.StartsWith('#') ? reference[1..] : reference;
+        if (reference.StartsWith('#'))
+        {
+            return _idMap.TryGetValue(reference[1..], out var byId) ? byId.Id : null;
+        }
 
-        if (_idMap.TryGetValue(key, out var node))
+        StateNode<TContext>? node = Root;
+        foreach (var key in StatePath.Split(reference))
+        {
+            node = node?.Children.FirstOrDefault(c => c.Key == key);
+        }
+
+        if (node is not null)
         {
             return node.Id;
         }
 
-        return _idMap.TryGetValue($"{Id}.{key}", out var relative) ? relative.Id : null;
+        return _idMap.TryGetValue(reference, out var full) ? full.Id : null;
     }
 
     internal IEnumerable<StateNode<TContext>> NodesOf(IEnumerable<string> ids) =>
@@ -210,7 +254,7 @@ public sealed partial class StateMachine<TContext> : IMachineLogic
     /// <summary>
     /// Stops the machine: stops every live child, cancels every outstanding timer, and returns a
     /// stopped snapshot. Exit actions do <em>not</em> run (xstate v6 <c>macrostep</c>'s
-    /// <c>@xstate.stop</c> branch: <c>stopChildren</c> + <c>cancelTimers</c> only).
+    /// <c>xstate.stop</c> branch: <c>stopChildren</c> + <c>cancelTimers</c> only).
     /// </summary>
     public TransitionResult<TContext> Stop(State<TContext> state) => Transition(state, new StopEvent());
 
@@ -225,7 +269,7 @@ public sealed partial class StateMachine<TContext> : IMachineLogic
         if (state is not State<TContext> typed)
         {
             throw new ArgumentException(
-                $"Snapshot of type {state.GetType().Name} does not belong to machine '{Id}' " +
+                $"Snapshot of type {state.GetType().Name} does not belong to {StatePath.DescribeMachine(Id)} " +
                 $"(expected State<{typeof(TContext).Name}>).");
         }
 

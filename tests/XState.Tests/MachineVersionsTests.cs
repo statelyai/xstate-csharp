@@ -83,39 +83,24 @@ public class MachineVersionsTests
     }
 
     [Fact]
-    public void Identity_falls_back_to_the_legacy_top_level_version()
+    public void A_machine_identity_without_a_version_is_an_invalid_snapshot()
     {
         var versions = MachineVersions.Create(V1, V2);
-        var legacy = SnapshotOf(V1) with { Machine = null, Version = "1.0.0" };
+        var partial = SnapshotOf(V1) with { Machine = new PersistedMachineIdentity("cart") };
 
-        var parsed = versions.ParseSnapshot(legacy);
-
-        Assert.Equal("1.0.0", parsed.Identity.Version);
-        Assert.Same(V1, parsed.Machine);
-        // Parsing stamps the identity it resolved, so the caller never has to resolve it twice.
-        Assert.Equal(new PersistedMachineIdentity("cart", "1.0.0"), parsed.Snapshot.Machine);
+        Assert.Throws<InvalidSnapshotException>(() => versions.ParseSnapshot(partial));
     }
 
     [Fact]
     public void Identity_falls_back_to_the_configured_unversioned_version_last()
     {
-        var bare = SnapshotOf(V1) with { Machine = null, Version = null };
+        var bare = SnapshotOf(V1) with { Machine = null };
 
         Assert.Same(V1, MachineVersions.Create([V1, V2], unversioned: "1.0.0").ParseSnapshot(bare).Machine);
 
         var error = Assert.Throws<InvalidOperationException>(
             () => MachineVersions.Create(V1, V2).ParseSnapshot(bare));
         Assert.Equal("Persisted snapshot is missing machine identity.", error.Message);
-    }
-
-    [Fact]
-    public void A_snapshot_whose_two_recorded_versions_disagree_is_refused()
-    {
-        var versions = MachineVersions.Create(V1, V2);
-        var conflicted = SnapshotOf(V2) with { Version = "1.0.0" };
-
-        var error = Assert.Throws<InvalidOperationException>(() => versions.ParseSnapshot(conflicted));
-        Assert.Equal("Persisted snapshot version '1.0.0' conflicts with machine version '2.0.0'.", error.Message);
     }
 
     [Fact]
@@ -151,7 +136,6 @@ public class MachineVersionsTests
         var migrated = versions.MigrateSnapshot(SnapshotOf(V2), "2.0.0", new Dictionary<string, Func<PersistedSnapshot, PersistedSnapshot>>());
 
         Assert.Equal(new PersistedMachineIdentity("cart", "2.0.0"), migrated.Machine);
-        Assert.Equal("2.0.0", migrated.Version);
     }
 
     [Fact]
@@ -171,9 +155,8 @@ public class MachineVersionsTests
 
         Assert.Equal("1.0.0", seen);
         Assert.Equal("checkout", migrated.Value);
-        // Finalize stamps the target identity in both places, so the result restores into V2.
+        // Finalize stamps the target identity, so the result restores into V2.
         Assert.Equal(new PersistedMachineIdentity("cart", "2.0.0"), migrated.Machine);
-        Assert.Equal("2.0.0", migrated.Version);
         Assert.True(V2.Restore(migrated).State.Matches("checkout"));
     }
 
@@ -181,7 +164,7 @@ public class MachineVersionsTests
     public void A_wildcard_migration_handles_everything_else_including_an_unresolvable_identity()
     {
         var versions = MachineVersions.Create(V1, V2);
-        var foreign = SnapshotOf(V1) with { Machine = new PersistedMachineIdentity("cart", "0.1.0"), Version = "0.1.0" };
+        var foreign = SnapshotOf(V1) with { Machine = new PersistedMachineIdentity("cart", "0.1.0") };
 
         var migrated = versions.MigrateSnapshot(foreign, "2.0.0", new Dictionary<string, Func<PersistedSnapshot, PersistedSnapshot>>
         {
@@ -207,7 +190,7 @@ public class MachineVersionsTests
         // With no wildcard and nothing to resolve, the parse failure is the real story and is what
         // surfaces (v6 rethrows `parseError`).
         var unresolvable = Assert.Throws<InvalidOperationException>(
-            () => versions.MigrateSnapshot(SnapshotOf(V1) with { Machine = null, Version = null }, "2.0.0", empty));
+            () => versions.MigrateSnapshot(SnapshotOf(V1) with { Machine = null }, "2.0.0", empty));
         Assert.Equal("Persisted snapshot is missing machine identity.", unresolvable.Message);
     }
 

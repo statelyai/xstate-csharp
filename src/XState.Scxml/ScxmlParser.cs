@@ -51,7 +51,7 @@ internal sealed class ScxmlParser(Func<string, string>? resolveSrc, IReadOnlyLis
     private readonly Dictionary<string, List<ScxmlInvokeMetadata>> _invokes = new(StringComparer.Ordinal);
 
     private XElement _rootElement = null!;
-    private string _machineId = "(machine)";
+    private string _machineId = "";
     private bool _lateBinding;
 
     public StateMachine<ScxmlDataModel> Parse(XDocument document)
@@ -73,7 +73,7 @@ internal sealed class ScxmlParser(Func<string, string>? resolveSrc, IReadOnlyLis
                 $"Only the \"ecmascript\" datamodel is supported (got \"{datamodel}\").");
         }
 
-        _machineId = _rootElement.Attribute("name")?.Value is { Length: > 0 } name ? name : "(machine)";
+        _machineId = _rootElement.Attribute("name")?.Value is { Length: > 0 } name ? name : "";
         _lateBinding = _rootElement.Attribute("binding")?.Value == "late";
 
         AssignIds(_rootElement, _machineId);
@@ -134,10 +134,9 @@ internal sealed class ScxmlParser(Func<string, string>? resolveSrc, IReadOnlyLis
             var key = scxmlId is { Length: > 0 } ? scxmlId : $"{local}{counter}";
             counter++;
 
-            // History nodes cannot carry an explicit id through the core builder, so their node id
-            // has to be spelled the way the core spells the alias it registers for an id-less node
-            // — "{nearest explicitly-id'd ancestor}.{key}" — and stays '.'-joined. History states
-            // never emit done events, so that dot is harmless.
+            // A history node's id is spelled "{nearest explicitly-id'd ancestor}.{key}" and installed
+            // as its explicit id; it stays '.'-joined. History states never emit done events, so
+            // that dot is harmless.
             //
             // An id-less *state*, by contrast, does get its generated id installed as an explicit
             // id, and that id surfaces in event names (done.state.{id}) where '.' is SCXML's token
@@ -148,7 +147,9 @@ internal sealed class ScxmlParser(Func<string, string>? resolveSrc, IReadOnlyLis
                 ? $"{nodeId}.{key}"
                 : scxmlId is { Length: > 0 } ? scxmlId : $"{nodeId}:{key}";
 
-            _nodeKeys[child] = key;
+            // A state key cannot contain an unescaped '.', so an SCXML id containing one is escaped
+            // in the key; the explicit id stays raw.
+            _nodeKeys[child] = key.Replace(".", "\\.", StringComparison.Ordinal);
 
             if (scxmlId is { Length: > 0 })
             {
@@ -256,11 +257,11 @@ internal sealed class ScxmlParser(Func<string, string>? resolveSrc, IReadOnlyLis
 
                     if (defaultTargets.Length == 0 && defaultContent is null)
                     {
-                        sb.History(childKey!, historyType);
+                        sb.History(childKey!, historyType, id: childId);
                     }
                     else
                     {
-                        sb.History(childKey!, historyType, configure: t =>
+                        sb.History(childKey!, historyType, id: childId, configure: t =>
                         {
                             if (defaultTargets.Length > 0)
                             {
@@ -909,14 +910,8 @@ internal sealed class ScxmlParser(Func<string, string>? resolveSrc, IReadOnlyLis
 
         void Walk(StateNode<ScxmlDataModel> node)
         {
-            // A history node's core id is the full path from the machine root, while the parser
-            // keys it by "{parent id}.{key}" (history states cannot carry an explicit id through
-            // the builder). Every other node had its parser id installed as its explicit id.
-            var parserId = node.Type is StateNodeType.History && node.Parent is { } historyParent
-                ? $"{historyParent.Id}.{node.Key}"
-                : node.Id;
-
-            if (_nodeElements.TryGetValue(parserId, out var element))
+            // Every node had its parser id installed as its explicit id.
+            if (_nodeElements.TryGetValue(node.Id, out var element))
             {
                 ScxmlMetadata.NodeSources.AddOrUpdate(node, element);
             }

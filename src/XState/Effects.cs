@@ -67,19 +67,25 @@ public sealed record StartEffect(string Id) : Effect
 /// <summary>
 /// A <em>delayed</em> raise: the event is destined for this actor's own internal queue once the
 /// delay elapses. An immediate raise never surfaces as an effect — it goes straight onto the
-/// internal queue inside the macrostep. The host schedules a timer under <see cref="Id"/> on the
-/// raising actor and sends it <see cref="TimerEvent"/> when it fires.
+/// internal queue inside the macrostep. The host schedules a timer on the raising actor and sends
+/// it <see cref="TimerEvent"/> with the timer's <see cref="TimerKey"/> when it fires: <see cref="Id"/>
+/// if given, else <see cref="Seq"/> (id-less raises are numbered by the actor's timer sequence),
+/// else — for built-in <c>after</c>/<c>timeout</c> timers — the event.
 /// </summary>
 public sealed record RaiseEffect(MachineEvent Event, string? Id, TimeSpan Delay) : Effect
 {
+    /// <summary>The timer sequence number stamped on an id-less, non-built-in delayed raise.</summary>
+    public int? Seq { get; init; }
+
     public override string Kind => "@xstate.raise";
 }
 
 /// <summary>
 /// Send an event to another actor. <see cref="Target"/> is a child id,
 /// <see cref="EffectTarget.Parent"/> or <see cref="EffectTarget.Self"/> — never null.
-/// <see cref="Delay"/> null means deliver now; otherwise the host schedules a timer under
-/// <see cref="Id"/> <em>on the sender</em> and sends it <see cref="TimerEvent"/> when it fires.
+/// <see cref="Delay"/> null means deliver now; otherwise the host schedules a timer
+/// <em>on the sender</em> (keyed by <see cref="Id"/>, else <see cref="Seq"/>) and sends it
+/// <see cref="TimerEvent"/> when it fires.
 /// </summary>
 public sealed record SendToEffect(
     string Target,
@@ -87,11 +93,14 @@ public sealed record SendToEffect(
     string? Id = null,
     TimeSpan? Delay = null) : Effect
 {
+    /// <summary>The timer sequence number stamped on an id-less delayed send.</summary>
+    public int? Seq { get; init; }
+
     public override string Kind => "@xstate.sendTo";
 }
 
-/// <summary>Cancel a logical timer by id.</summary>
-public sealed record CancelEffect(string SendId) : Effect
+/// <summary>Cancel the logical timer(s) matching <see cref="Key"/>.</summary>
+public sealed record CancelEffect(TimerKey Key) : Effect
 {
     public override string Kind => "@xstate.cancel";
 }

@@ -285,10 +285,8 @@ public class CoreSemanticsTests
         Assert.Equal(new Order(Note: "fetched"), entryInput);
         Assert.Equal(new Order(Note: "fetched"), invokeInput);
 
-        // Both entries live on: v6 never prunes `_stateInputs`.
-        Assert.Equal(
-            ["input.idle", "input.loading"],
-            loading.State.StateInputs.Keys.Order());
+        // Only active states keep an input: the exited `idle` entry is pruned.
+        Assert.Equal(["input.loading"], loading.State.StateInputs.Keys.Order());
 
         // The exiting state still sees the input it was entered with.
         var done = machine.Transition(loading.State, new DoneActorEvent("child", null, "0"));
@@ -445,7 +443,7 @@ public class CoreSemanticsTests
         Assert.Equal(routed, machine.Transition(routed, new RouteEvent("#nope")).State);
         Assert.Equal(routed, machine.Transition(routed, new RouteEvent("#secret")).State);
 
-        Assert.True(machine.Transition(routed, new RouteEvent("#home")).State.Matches("app.home"));
+        Assert.True(machine.Transition(routed, new RouteEvent("#home")).State.Matches("home"));
     }
 
     // ------------------------------------------------------------------

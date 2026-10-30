@@ -51,7 +51,7 @@ internal static class ScxmlSerializer
             new XAttribute("version", "1.0"),
             new XAttribute("datamodel", "ecmascript"));
 
-        if (machine.Id != "(machine)")
+        if (machine.Id.Length > 0)
         {
             root.Add(new XAttribute("name", machine.Id));
         }

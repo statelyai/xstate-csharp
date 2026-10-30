@@ -32,8 +32,8 @@ public sealed partial class StateMachine<TContext>
         public Dictionary<string, int> NextActorIds { get; } = new(StringComparer.Ordinal);
 
         /// <summary>
-        /// Next generated delayed send/raise index (xstate v6 <c>_nextTimerId</c>); carried across
-        /// macrosteps on the snapshot.
+        /// Next timer sequence number for an id-less delayed send/raise (xstate v6
+        /// <c>_nextTimerId</c>); carried across macrosteps on the snapshot.
         /// </summary>
         public int NextTimerId { get; set; }
 
@@ -122,7 +122,7 @@ public sealed partial class StateMachine<TContext>
 
         var run = NewRun(state);
 
-        // @xstate.stop: stop the children, cancel the timers, done. No state is exited, so no
+        // xstate.stop: stop the children, cancel the timers, done. No state is exited, so no
         // exit action runs (stateUtils.ts `macrostep`, the XSTATE_STOP branch).
         if (evt is StopEvent)
         {
@@ -183,15 +183,15 @@ public sealed partial class StateMachine<TContext>
     }
 
     /// <summary>
-    /// <c>xstate.timer</c> — the host reports that the timer with this id elapsed. An id that is
-    /// no longer on the ledger is a stale firing (the timer was cancelled, or its state exited)
+    /// <c>xstate.timer</c> — the host reports that the timer with this key elapsed. A key that
+    /// matches nothing on the ledger is a stale firing (the timer was cancelled, or its state exited)
     /// and changes nothing. Otherwise the timer is struck off and its event delivered: a
     /// <see cref="TimerKind.Raise"/> onto the internal queue, a <see cref="TimerKind.SendTo"/> as
     /// an immediate send (stateUtils.ts `macrostep`, the XSTATE_TIMER branch).
     /// </summary>
     private TransitionResult<TContext> FireTimer(Run run, State<TContext> state, TimerEvent evt)
     {
-        var timer = run.Timers.FirstOrDefault(t => t.Id == evt.Id);
+        var timer = run.Timers.FirstOrDefault(evt.Key.Matches);
         if (timer is null)
         {
             return new TransitionResult<TContext>(state, []);
@@ -301,9 +301,7 @@ public sealed partial class StateMachine<TContext>
             run.StateInputs[stateId] = input;
         }
 
-        // `Timers` is keyed by id, so the persisted ledger has no order of its own; restoring it
-        // in id order keeps teardown (which cancels every outstanding timer) reproducible.
-        run.Timers.AddRange(state.Timers.Values.OrderBy(t => t.Id, StringComparer.Ordinal));
+        run.Timers.AddRange(state.Timers);
 
         // Defensive restore floor. The counters travel on the same snapshot as `Children`, so a
         // snapshot this machine produced already reserves every generated-shaped child id — but a
@@ -338,7 +336,7 @@ public sealed partial class StateMachine<TContext>
                 NextTimerId = run.NextTimerId,
                 NextIncarnation = run.NextIncarnation,
                 Children = [.. run.Children],
-                Timers = run.Timers.ToImmutableDictionary(t => t.Id, t => t, StringComparer.Ordinal),
+                Timers = [.. run.Timers],
                 StateInputs = run.StateInputs.ToImmutableDictionary(StringComparer.Ordinal)
             },
             [.. run.Effects]);
@@ -350,15 +348,14 @@ public sealed partial class StateMachine<TContext>
         var nextEvent = evt;
         var shouldSelectEventless = true;
         var iterations = 0;
+        // The last few state values visited, for the infinite-loop error (stateUtils.ts macrostep).
+        var recentStates = new List<object>();
 
         while (run.Status is SnapshotStatus.Active)
         {
             if (++iterations > MaxMicrosteps)
             {
-                throw new InvalidOperationException(
-                    $"Infinite loop detected in machine '{Id}': more than {MaxMicrosteps} microsteps were " +
-                    "processed without reaching a stable state. This usually means a cycle of eventless " +
-                    "transitions or raised events (e.g. a -> b -> c -> a).");
+                throw new InfiniteTransitionError(Id, evt, MaxMicrosteps, recentStates);
             }
 
             var enabled = shouldSelectEventless ? SelectEventlessTransitions(run, nextEvent) : [];
@@ -379,6 +376,12 @@ public sealed partial class StateMachine<TContext>
             }
 
             Microstep(run, enabled, nextEvent, isInitial: false);
+
+            recentStates.Add(StateValueOf(run.Nodes.OrderBy(n => n.Order).Select(n => n.Id)));
+            if (recentStates.Count > 5)
+            {
+                recentStates.RemoveAt(0);
+            }
 
             // Eventless transitions are only re-selected if the microstep changed something.
             shouldSelectEventless = !hadEventless || Changed(before, run);
@@ -437,7 +440,7 @@ public sealed partial class StateMachine<TContext>
             // (stateUtils.ts:514-522, `matchesActorSession`).
             Emit(run, new RaiseEffect(
                 new ActorTimeoutEvent(invoke.Id, spawned.Incarnation),
-                invoke.TimeoutSendId,
+                null,
                 invoke.Timeout.Resolve(args)));
         }
     }
@@ -472,6 +475,16 @@ public sealed partial class StateMachine<TContext>
             // Exit actions read the state input the state was *entered* with, so they run before
             // this transition's own input is recorded (stateUtils.ts:1573-1583).
             ExitStates(run, filtered, evt);
+
+            // Keep only the inputs of states still active after exiting, so exited (and
+            // re-entered) states never see a stale input (stateUtils.ts:1842-1854).
+            foreach (var id in run.StateInputs.Keys.ToList())
+            {
+                if (!run.Nodes.Any(n => n.Id == id))
+                {
+                    run.StateInputs.Remove(id);
+                }
+            }
         }
 
         // Transition content runs between exit and entry, scoped to the source state's input.
@@ -480,9 +493,9 @@ public sealed partial class StateMachine<TContext>
             RunActions(run, transition.Actions, evt, transition.Source.Id);
         }
 
-        // xstate v6 stateUtils.ts:1855-1867: the input a transition carries is recorded under
-        // *every* target's id, before the entry pass — so the entering state's own entry actions,
-        // invokes and output already see it. Entries are never pruned.
+        // xstate v6 stateUtils.ts:1855-1867: the input a transition carries is recorded under each
+        // target the transition actually enters, before the entry pass — so the entering state's
+        // own entry actions, invokes and output already see it.
         foreach (var transition in filtered)
         {
             ApplyTransitionInput(run, transition, evt);
@@ -536,7 +549,7 @@ public sealed partial class StateMachine<TContext>
 
         if (node.Timeout is not null)
         {
-            Emit(run, new CancelEffect(node.TimeoutSendId));
+            Emit(run, new CancelEffect(new TimerKey.ByEvent(new TimeoutEvent(node.Id))));
         }
 
         RunActions(run, node.Exit, evt, node.Id);
@@ -552,7 +565,7 @@ public sealed partial class StateMachine<TContext>
         {
             if (invoke.Timeout is not null)
             {
-                Emit(run, new CancelEffect(invoke.TimeoutSendId));
+                Emit(run, new CancelEffect(new TimerKey.ByEvent(new ActorTimeoutEvent(invoke.Id))));
             }
 
             Emit(run, new StopChildEffect(invoke.Id));
@@ -572,10 +585,10 @@ public sealed partial class StateMachine<TContext>
     /// </summary>
     private static void CancelActorTimeout(Run run, string actorId)
     {
-        var timerId = $"xstate.timeout.actor.{actorId}";
-        if (run.Timers.Any(t => t.Id == timerId))
+        var key = new TimerKey.ByEvent(new ActorTimeoutEvent(actorId));
+        if (run.Timers.Any(key.Matches))
         {
-            Emit(run, new CancelEffect(timerId));
+            Emit(run, new CancelEffect(key));
         }
     }
 
@@ -587,7 +600,7 @@ public sealed partial class StateMachine<TContext>
     {
         foreach (var timer in run.Timers.ToList())
         {
-            Emit(run, new CancelEffect(timer.Id));
+            Emit(run, new CancelEffect(timer.Key));
         }
 
         foreach (var child in run.Children.ToList())
@@ -598,9 +611,8 @@ public sealed partial class StateMachine<TContext>
 
     /// <summary>
     /// Records an effect and keeps the child/timer bookkeeping in sync. The recorded effect may
-    /// differ from the one passed in (a spawn is stamped with its incarnation token; an id-less
-    /// delayed raise/send is given a generated timer id), and a delayed raise/send that replaces
-    /// an outstanding timer of the same id is preceded by its cancel.
+    /// differ from the one passed in (a spawn is stamped with its incarnation token; an id-less,
+    /// non-built-in delayed raise/send is stamped with the next timer sequence number).
     /// </summary>
     private static Effect Emit(Run run, Effect effect)
     {
@@ -635,7 +647,7 @@ public sealed partial class StateMachine<TContext>
                 var stamped = spawn with { Incarnation = incarnation };
                 effect = stamped;
 
-                run.Children.Add(new ChildRecord(stamped.Id, stamped.Src, incarnation));
+                run.Children.Add(new ChildRecord(stamped.Id, stamped.Src, incarnation, stamped.SyncSnapshot));
                 run.DeferredStarts.Add(stamped.Id);
                 break;
 
@@ -647,22 +659,22 @@ public sealed partial class StateMachine<TContext>
 
             case RaiseEffect raise:
             {
-                var timerId = raise.Id ?? MintTimerId(run);
-                if (raise.Id is null)
+                var seq = NextSeq(run, raise.Id, raise.Event);
+                if (seq is not null)
                 {
-                    effect = raise with { Id = timerId };
+                    effect = raise with { Seq = seq };
                 }
 
-                ScheduleTimer(run, new LogicalTimer(timerId, raise.Delay, TimerKind.Raise, raise.Event, null));
+                ScheduleTimer(run, new LogicalTimer(raise.Id, seq, raise.Delay, TimerKind.Raise, raise.Event, null));
                 break;
             }
 
             case SendToEffect { Delay: not null } send:
             {
-                var timerId = send.Id ?? MintTimerId(run);
-                if (send.Id is null)
+                var seq = NextSeq(run, send.Id, send.Event);
+                if (seq is not null)
                 {
-                    effect = send with { Id = timerId };
+                    effect = send with { Seq = seq };
                 }
 
                 // The timer lives on the *sender*; `null` records "deliver to myself", matching
@@ -670,12 +682,12 @@ public sealed partial class StateMachine<TContext>
                 var target = send.Target == EffectTarget.Self ? null : send.Target;
                 ScheduleTimer(
                     run,
-                    new LogicalTimer(timerId, send.Delay.Value, TimerKind.SendTo, send.Event, target));
+                    new LogicalTimer(send.Id, seq, send.Delay.Value, TimerKind.SendTo, send.Event, target));
                 break;
             }
 
             case CancelEffect cancel:
-                run.Timers.RemoveAll(t => t.Id == cancel.SendId);
+                run.Timers.RemoveAll(cancel.Key.Matches);
                 break;
         }
 
@@ -684,30 +696,37 @@ public sealed partial class StateMachine<TContext>
     }
 
     /// <summary>
-    /// A deterministic handle for an id-less delayed raise/send — without one it could never be
-    /// cancelled on teardown. xstate v6 <c>updateLogicalTimers</c> mints the same shape.
+    /// The sequence number of an id-less delayed raise/send, so it can still be fired and
+    /// cancelled by key. Built-in <c>after</c>/<c>timeout</c> timers get none: their event is
+    /// their identity (xstate v6 <c>updateLogicalTimers</c>).
     /// </summary>
-    private static string MintTimerId(Run run) => $"xstate.timer.auto.{run.NextTimerId++}";
+    private static int? NextSeq(Run run, string? id, MachineEvent evt) =>
+        id is null && evt is not (AfterEvent or TimeoutEvent or ActorTimeoutEvent)
+            ? run.NextTimerId++
+            : null;
 
     /// <summary>
-    /// Adds a timer to the ledger. Scheduling over an outstanding id replaces it
-    /// (setTimeout-by-key), and the replacement is preceded by the cancel of the timer it
-    /// supersedes — the same way re-entering a state cancels and reschedules its `after` timers.
+    /// Adds a timer to the ledger. Scheduling over an outstanding key replaces that timer in
+    /// place, keeping its position, without a cancel: the host re-keys its schedule
+    /// (xstate v6 <c>updateLogicalTimers</c>).
     /// </summary>
     private static void ScheduleTimer(Run run, LogicalTimer timer)
     {
-        if (run.Timers.RemoveAll(t => t.Id == timer.Id) > 0)
+        var index = run.Timers.FindIndex(timer.Key.Matches);
+        if (index >= 0)
         {
-            run.Effects.Add(new CancelEffect(timer.Id));
+            run.Timers[index] = timer;
         }
-
-        run.Timers.Add(timer);
+        else
+        {
+            run.Timers.Add(timer);
+        }
     }
 
     /// <summary>
     /// The generated-id prefix of a spawned/invoked logic — a port of xstate v6
-    /// <c>getActorIdPrefix</c> (<c>system.ts</c>): the logic's own id, unless it is empty or the
-    /// anonymous-machine placeholder, in which case the last-resort prefix <c>x</c> is used.
+    /// <c>getActorIdPrefix</c> (<c>system.ts</c>): the logic's own id, unless it is empty (an
+    /// anonymous machine), in which case the last-resort prefix <c>x</c> is used.
     /// <para>
     /// Deviation from v6: v6 prefers the <em>registered source key</em> when a spawn names its
     /// logic by string (<c>spawn('fetchUser')</c>). This port has no source-name registry — a
@@ -723,22 +742,33 @@ public sealed partial class StateMachine<TContext>
     /// </para>
     /// </summary>
     private static string ActorIdPrefix(IActorLogic logic) =>
-        logic is IMachineLogic { Id: { Length: > 0 } logicId } && logicId != ActorAddress.AnonymousMachineId
+        logic is IMachineLogic { Id: { Length: > 0 } logicId }
             ? logicId
             : "x";
 
     /// <summary>
     /// Allocates the next generated child id (<c>{prefix}:{n}</c>) and advances that prefix's
     /// counter — xstate v6 <c>allocateChildId</c> (<c>transitionActions.ts</c>). The counters ride
-    /// on the snapshot, so a replay from the same snapshot allocates the same ids.
+    /// on the snapshot, so a replay from the same snapshot allocates the same ids. An index whose
+    /// id is already held — by a live child, or as the id of an active state's invoke — is
+    /// skipped (v6 <c>nextFreeChildIndex</c>).
     /// </summary>
     private static string AllocateActorId(Run run, IActorLogic logic)
     {
         var prefix = ActorIdPrefix(logic);
         var next = run.NextActorIds.TryGetValue(prefix, out var counter) ? counter : 0;
+        while (IsActorIdHeld(run, $"{prefix}:{next}"))
+        {
+            next++;
+        }
+
         run.NextActorIds[prefix] = next + 1;
         return $"{prefix}:{next}";
     }
+
+    private static bool IsActorIdHeld(Run run, string id) =>
+        run.Children.Any(c => c.Id == id) ||
+        run.Nodes.Any(n => n.Invokes.Any(i => i.Id == id));
 
     /// <summary>
     /// xstate v6 <c>parseGeneratedActorId</c> + <c>reserveChildId</c> (<c>system.ts</c>,
@@ -989,8 +1019,6 @@ public sealed partial class StateMachine<TContext>
         {
             run.Nodes.Add(node);
 
-            ScheduleDelayedTransitions(run, node, evt);
-
             // Invoked actors are spawned *before* the entry actions run (xstate v6 order), so
             // an entry action can already address the child by id — unless the machine defers
             // invocations to the end of the macrostep (SCXML order), in which case the node is
@@ -1015,7 +1043,7 @@ public sealed partial class StateMachine<TContext>
                 // then any history default transition rooted at this node (stateUtils.ts:1963-1999).
                 if (node.InitialTransition is { } initial)
                 {
-                    ApplyTransitionInput(run, initial, evt);
+                    ApplyTransitionInput(run, initial, evt, defaultEntry: true);
                     RunActions(run, initial.Actions, evt, node.Id);
                 }
 
@@ -1023,11 +1051,15 @@ public sealed partial class StateMachine<TContext>
                 {
                     foreach (var defaultTransition in defaults)
                     {
-                        ApplyTransitionInput(run, defaultTransition, evt);
+                        ApplyTransitionInput(run, defaultTransition, evt, defaultEntry: true);
                         RunActions(run, defaultTransition.Actions, evt, node.Id);
                     }
                 }
             }
+
+            // Delays resolve against the context the entry actions just produced (xstate v6 #5756);
+            // cancel-on-exit order is unchanged.
+            ScheduleDelayedTransitions(run, node, evt);
 
             if (node.Type is not StateNodeType.Final)
             {
@@ -1082,12 +1114,13 @@ public sealed partial class StateMachine<TContext>
     }
 
     /// <summary>
-    /// Records the input a transition carries under every one of its targets
+    /// Records the input a transition carries under each of its targets that it enters
     /// (xstate v6 <c>_stateInputs</c>, stateUtils.ts:1855-1867). A targetless transition records
-    /// nothing, and the ledger is never pruned — an entry is only ever overwritten by a later
-    /// entry of the same state.
+    /// nothing; a target still active after the exit pass (not re-entered) keeps its old input.
+    /// Initial and history default transitions (<paramref name="defaultEntry"/>) always record.
     /// </summary>
-    private static void ApplyTransitionInput(Run run, TransitionDefinition<TContext> transition, MachineEvent evt)
+    private static void ApplyTransitionInput(
+        Run run, TransitionDefinition<TContext> transition, MachineEvent evt, bool defaultEntry = false)
     {
         if (transition.InputResolver is null || transition.Targets.Count == 0)
         {
@@ -1098,6 +1131,11 @@ public sealed partial class StateMachine<TContext>
 
         foreach (var target in transition.Targets)
         {
+            if (!defaultEntry && run.Nodes.Contains(target))
+            {
+                continue;
+            }
+
             run.StateInputs[target.Id] = input;
         }
     }
@@ -1175,7 +1213,7 @@ public sealed partial class StateMachine<TContext>
     // --- Actions -> context updates / raised events / effects ---
 
     /// <summary>Portable action type of the built-in <c>log</c> action.</summary>
-    internal const string LogActionType = "xstate.log";
+    internal const string LogActionType = "@xstate.log";
 
     /// <summary>
     /// Action args scoped to one state: its own <see cref="ActionArgs{TContext}.Input"/> plus the
@@ -1249,7 +1287,7 @@ public sealed partial class StateMachine<TContext>
                     break;
 
                 case CancelAction<TContext> cancel:
-                    Emit(run, new CancelEffect(cancel.SendIdResolver(args)));
+                    Emit(run, new CancelEffect(cancel.KeyResolver(args)));
                     break;
 
                 case LogAction<TContext> log:
@@ -1362,17 +1400,17 @@ public sealed partial class StateMachine<TContext>
             // v6 compiles `after` into an entry-time `enq.raise(event, { id, delay })` and an
             // exit-time `enq.cancel(id)`, so a delayed transition is a delayed *raise*: when it
             // fires the event lands on the internal queue of the state that scheduled it.
-            Emit(run, new RaiseEffect(afterEvent, afterEvent.SendId, resolved));
+            Emit(run, new RaiseEffect(afterEvent, null, resolved));
         }
 
         // A state-level `timeout` is its own event category, so it can never collide with an
-        // `after` entry on the same state (stateUtils.ts:466-470). The delay is resolved eagerly,
-        // here at entry time; `onTimeout` sees the input as it stands when the timer fires.
+        // `after` entry on the same state (stateUtils.ts:466-470). The delay is resolved once,
+        // after the state's entry actions (so it sees post-entry context); `onTimeout` sees the input as it stands when the timer fires.
         if (node.Timeout is not null)
         {
             Emit(run, new RaiseEffect(
                 new TimeoutEvent(node.Id),
-                node.TimeoutSendId,
+                null,
                 node.Timeout.Resolve(args)));
         }
     }
@@ -1381,7 +1419,7 @@ public sealed partial class StateMachine<TContext>
     {
         for (var i = 0; i < node.After.Count; i++)
         {
-            Emit(run, new CancelEffect(new AfterEvent(node.AfterKeys[i], node.Id).SendId));
+            Emit(run, new CancelEffect(new TimerKey.ByEvent(new AfterEvent(node.AfterKeys[i], node.Id))));
         }
     }
 
@@ -1528,23 +1566,21 @@ public sealed partial class StateMachine<TContext>
     {
         var configuration = run.Nodes.Select(n => n.Id).ToHashSet();
         return stateId =>
-            configuration.Contains(stateId.StartsWith('#') ? stateId[1..] : stateId) ||
+            (!stateId.StartsWith('#') && configuration.Contains(stateId)) ||
             (ResolveStateId(stateId) is { } resolved && configuration.Contains(resolved));
     }
 
     /// <summary>
     /// Candidate transitions for an event — a port of xstate v6 <c>getCandidates</c>
-    /// (<c>stateUtils.ts</c>): every descriptor that names the event type (or one of its legacy
-    /// aliases) exactly comes first in document order, then the descriptors that only matched by
+    /// (<c>stateUtils.ts</c>): every descriptor that names the event type exactly comes first in document order, then the descriptors that only matched by
     /// wildcard, <em>longest descriptor string first</em>.
     /// </summary>
     private static IEnumerable<TransitionDefinition<TContext>> Candidates(
         StateNode<TContext> node,
         MachineEvent evt)
     {
-        var aliases = EventAliases(evt);
         var matching = node.Transitions
-            .Where(t => t.Event is not null && DescriptorMatches(t.Event, evt, aliases))
+            .Where(t => t.Event is not null && t.Event.Matches(evt))
             .ToList();
 
         if (matching.Count == 0)
@@ -1552,9 +1588,9 @@ public sealed partial class StateMachine<TContext>
             return [];
         }
 
-        var exact = matching.Where(t => IsExactDescriptor(t.Event!, evt, aliases)).OrderBy(t => t.Order);
+        var exact = matching.Where(t => IsExactDescriptor(t.Event!, evt)).OrderBy(t => t.Order);
         var wildcard = matching
-            .Where(t => !IsExactDescriptor(t.Event!, evt, aliases))
+            .Where(t => !IsExactDescriptor(t.Event!, evt))
             .OrderByDescending(t => DescriptorLength(t.Event!))
             .ThenBy(t => t.Order);
 
@@ -1568,55 +1604,12 @@ public sealed partial class StateMachine<TContext>
     /// </summary>
     private static bool IsExactDescriptor(
         EventDescriptor descriptor,
-        MachineEvent evt,
-        IReadOnlyList<string> aliases) =>
+        MachineEvent evt) =>
         descriptor is not EventDescriptor.ByPattern pattern ||
-        pattern.Pattern == evt.Type ||
-        aliases.Contains(pattern.Pattern);
+        pattern.Pattern == evt.Type;
 
     private static int DescriptorLength(EventDescriptor descriptor) =>
         descriptor is EventDescriptor.ByPattern pattern ? pattern.Pattern.Length : int.MaxValue;
-
-    private static bool DescriptorMatches(EventDescriptor descriptor, MachineEvent evt, IReadOnlyList<string> aliases)
-    {
-        if (descriptor.Matches(evt))
-        {
-            return true;
-        }
-
-        // Legacy/flattened descriptors: `xstate.done.state.{stateId}`, `xstate.after.{delay}.{stateId}`, ...
-        return descriptor is EventDescriptor.ByPattern pattern &&
-               aliases.Any(alias => MatchesPattern(pattern.Pattern, alias));
-    }
-
-    /// <summary>
-    /// utils.ts `matchesEventDescriptor` — strict: only an explicit trailing ".*"
-    /// matches a prefix, so "xstate.done.state.a" does not match a child's
-    /// "xstate.done.state.a.b".
-    /// </summary>
-    private static bool MatchesPattern(string pattern, string type)
-    {
-        if (pattern == "*" || pattern == type)
-        {
-            return true;
-        }
-
-        return pattern.EndsWith(".*", StringComparison.Ordinal) &&
-               type.StartsWith(pattern[..^1], StringComparison.Ordinal);
-    }
-
-    /// <summary>eventUtils.ts `getEventTypeAliases` (minus the canonical type itself).</summary>
-    private static IReadOnlyList<string> EventAliases(MachineEvent evt) => evt switch
-    {
-        DoneStateEvent e => [$"xstate.done.state.{e.StateId}"],
-        DoneActorEvent e => [$"xstate.done.actor.{e.ActorId}"],
-        ErrorActorEvent e => [$"xstate.error.actor.{e.ActorId}"],
-        AfterEvent e => [$"xstate.after.{e.Delay}.{e.StateId}"],
-        TimeoutEvent e => [$"xstate.timeout.{e.StateId}"],
-        ActorTimeoutEvent e => [$"xstate.timeout.actor.{e.ActorId}"],
-        SnapshotEvent e => [$"xstate.snapshot.{e.ActorId}"],
-        _ => []
-    };
 
     // --- Conflict resolution / transition domain (SCXML) ---
 

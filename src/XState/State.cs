@@ -15,15 +15,33 @@ public enum TimerKind
 /// <summary>
 /// A timer the machine believes is outstanding — the durable half of a delayed raise/send.
 /// The host owns only the clock: when the delay elapses it sends <see cref="TimerEvent"/> with
-/// this id back to the owning actor, and the machine decides what firing means.
+/// this timer's <see cref="Key"/> back to the owning actor, and the machine decides what firing
+/// means.
 /// </summary>
+/// <param name="Id">The explicit id the raise/send was scheduled with, if any.</param>
+/// <param name="Seq">
+/// The actor's sequence number for an id-less delayed raise/send. Built-in <c>after</c>/
+/// <c>timeout</c> timers have neither id nor seq; their event identifies them.
+/// </param>
 /// <param name="Target">The send target; null means the owning actor itself.</param>
 public sealed record LogicalTimer(
-    string Id,
+    string? Id,
+    int? Seq,
     TimeSpan Delay,
     TimerKind Kind,
     MachineEvent Event,
-    string? Target);
+    string? Target)
+{
+    /// <summary>This timer's identity: id, else seq, else event (v6 <c>getTimerKey</c>).</summary>
+    public TimerKey Key => TimerKey.For(this);
+
+    /// <summary>
+    /// The timer's absolute start in Unix milliseconds, as a host recorded it
+    /// (<see cref="Persistence.PersistedTimer.ScheduledAt"/>). The pure core never sets it; it
+    /// only carries it through restore so a host can re-arm against the original deadline.
+    /// </summary>
+    public double? ScheduledAt { get; init; }
+}
 
 /// <summary>
 /// A child actor the machine believes is running.
@@ -37,7 +55,11 @@ public sealed record LogicalTimer(
 /// done/error event it relays, so a completion from a previous incarnation of the same id can be
 /// told apart from this one's.
 /// </param>
-public sealed record ChildRecord(string Id, string? Src, string Incarnation);
+/// <param name="SyncSnapshot">
+/// Whether the parent observes this child's snapshots (<see cref="SpawnEffect.SyncSnapshot"/>);
+/// persisted as v6 <c>syncSnapshot</c>.
+/// </param>
+public sealed record ChildRecord(string Id, string? Src, string Incarnation, bool SyncSnapshot = false);
 
 /// <summary>
 /// An immutable machine snapshot: configuration + context + status, plus the durable ledgers
@@ -79,8 +101,9 @@ public sealed record State<TContext> : ISnapshot
         ImmutableDictionary.Create<string, int>(StringComparer.Ordinal);
 
     /// <summary>
-    /// Next index for generated timer ids (<c>xstate.timer.auto.{n}</c>); monotonic across
-    /// macrosteps. xstate v6 counterpart: <c>_nextTimerId</c> (<c>transitionActions.ts</c>).
+    /// Next timer sequence number (<see cref="LogicalTimer.Seq"/>) for an id-less delayed
+    /// raise/send; monotonic across macrosteps. xstate v6 counterpart: <c>_nextTimerId</c>
+    /// (<c>transitionActions.ts</c>).
     /// </summary>
     public int NextTimerId { get; internal init; }
 
@@ -95,30 +118,29 @@ public sealed record State<TContext> : ISnapshot
     /// <summary>Children believed to be running (invoked + spawned), in spawn order.</summary>
     public ImmutableArray<ChildRecord> Children { get; internal init; } = [];
 
-    /// <summary>Logical timers believed to be outstanding, keyed by timer id.</summary>
-    public ImmutableDictionary<string, LogicalTimer> Timers { get; internal init; } =
-        ImmutableDictionary.Create<string, LogicalTimer>(StringComparer.Ordinal);
+    /// <summary>Logical timers believed to be outstanding, in scheduling order.</summary>
+    public ImmutableList<LogicalTimer> Timers { get; internal init; } = [];
 
     /// <summary>
     /// Per-state input (xstate v6 <c>_stateInputs</c>): the value the transition that entered a
-    /// state carried for it, keyed by state id. Entries are never pruned on exit (v6 keeps
-    /// <c>_stateInputs</c> the same way): an inactive state's last input stays readable until the
-    /// next transition into it overwrites it. Surfaced to that state's entry/exit actions, invoke
-    /// input resolvers and final-state output resolvers as <see cref="ActionArgs{TContext}.Input"/>.
+    /// state carried for it, keyed by state id. Only active states carry an entry: an exited
+    /// state's input is dropped, and a transition onto an already-active target it does not
+    /// re-enter leaves that target's input as it was. Surfaced to that state's entry/exit actions,
+    /// invoke input resolvers and final-state output resolvers as <see cref="ActionArgs{TContext}.Input"/>.
     /// </summary>
     public ImmutableDictionary<string, object?> StateInputs { get; internal init; } =
         ImmutableDictionary.Create<string, object?>(StringComparer.Ordinal);
 
     /// <summary>
-    /// Whether the given state path/id is active. Accepts full ids ("machine.a.b"),
-    /// relative paths ("a.b"), or explicit ids ("#a").
+    /// Whether the given state path/id is active. Accepts full ids ("machine.a.b"), paths
+    /// relative to the root ("a.b"), or a whole state id after <c>#</c> ("#a") — <c>#</c> is an
+    /// exact id lookup, never an id followed by a path.
     /// </summary>
     public bool Matches(string statePath)
     {
-        if (Configuration.Contains(statePath.StartsWith('#') ? statePath[1..] : statePath))
+        if (!statePath.StartsWith('#') && Configuration.Contains(statePath))
             return true;
 
-        // Explicit ids and key paths are aliases of the same node, so resolve through the machine.
         return Machine?.ResolveStateId(statePath) is { } resolved && Configuration.Contains(resolved);
     }
 
