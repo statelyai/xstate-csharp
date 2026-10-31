@@ -54,6 +54,13 @@ public record Toggle : MachineEvent;
 decide how effects run: transactionally, async, distributed, replayed, or in tests against a
 virtual clock.
 
+<!-- macrostep loop protection from src/XState/StateMachine.cs, src/XState/Builder/MachineBuilder.cs and src/XState/InfiniteTransitionError.cs -->
+
+Each macrostep is limited to 1,000 microsteps by default. If eventless transitions or raised events
+do not stabilize, `Transition` throws `InfiniteTransitionError` with the actor, event, limit, and
+five most recent states. Use `.MaxMicrosteps(n)` when building a machine that intentionally needs a
+higher bound.
+
 ## Effects
 
 Every side effect is an `Effect` record with the same `Kind` discriminant as XState v6. Each one
@@ -71,9 +78,11 @@ references become addresses.
 | `EmitEffect` | `emit` | Emit an event to subscribers. |
 | `ActionEffect` | `action` | Run an action by `(type, params)` if it has a portable identity. |
 
-Delays are logical timers. The machine records an id on its `Timers` ledger; your clock reports
-that the id elapsed by sending an `xstate.timer` event. The machine ignores ids it no longer holds,
-so a cancel racing a firing is not a bug.
+<!-- logical timer identity from src/XState/TimerKey.cs and src/XState/StateMachine.Algorithm.cs -->
+
+Delays are logical timers. The machine records a `TimerKey` (explicit id, sequence, or event) on
+its `Timers` ledger; your clock reports that key elapsed with a `TimerEvent`. The machine ignores
+keys it no longer holds, so a cancel racing a firing is not a bug.
 
 ## Durable execution
 
