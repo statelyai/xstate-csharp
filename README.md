@@ -54,6 +54,13 @@ public record Toggle : MachineEvent;
 decide how effects run: transactionally, async, distributed, replayed, or in tests against a
 virtual clock.
 
+<!-- macrostep loop protection from src/XState/StateMachine.cs, src/XState/Builder/MachineBuilder.cs and src/XState/InfiniteTransitionError.cs -->
+
+Each macrostep is limited to 1,000 microsteps by default. If eventless transitions or raised events
+do not stabilize, `Transition` throws `InfiniteTransitionError` with the actor, event, limit, and
+five most recent states. Use `.MaxMicrosteps(n)` when building a machine that intentionally needs a
+higher bound.
+
 ## Effects
 
 Every side effect is an `Effect` record with the same `Kind` discriminant as XState v6. Each one
