@@ -78,9 +78,11 @@ references become addresses.
 | `EmitEffect` | `emit` | Emit an event to subscribers. |
 | `ActionEffect` | `action` | Run an action by `(type, params)` if it has a portable identity. |
 
-Delays are logical timers. The machine records an id on its `Timers` ledger; your clock reports
-that the id elapsed by sending an `xstate.timer` event. The machine ignores ids it no longer holds,
-so a cancel racing a firing is not a bug.
+<!-- logical timer identity from src/XState/TimerKey.cs and src/XState/StateMachine.Algorithm.cs -->
+
+Delays are logical timers. The machine records a `TimerKey` (explicit id, sequence, or event) on
+its `Timers` ledger; your clock reports that key elapsed with a `TimerEvent`. The machine ignores
+keys it no longer holds, so a cancel racing a firing is not a bug.
 
 ## Durable execution
 
