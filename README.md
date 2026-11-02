@@ -54,12 +54,13 @@ public record Toggle : MachineEvent;
 decide how effects run: transactionally, async, distributed, replayed, or in tests against a
 virtual clock.
 
-<!-- macrostep loop protection from src/XState/StateMachine.cs, src/XState/Builder/MachineBuilder.cs and src/XState/InfiniteTransitionError.cs -->
+<!-- macrostep loop protection from src/XState/StateMachine.Algorithm.cs, src/XState/Builder/MachineBuilder.cs and src/XState/InfiniteTransitionError.cs -->
 
-Each macrostep is limited to 1,000 microsteps by default. If eventless transitions or raised events
-do not stabilize, `Transition` throws `InfiniteTransitionError` with the actor, event, limit, and
-five most recent states. Use `.MaxMicrosteps(n)` when building a machine that intentionally needs a
-higher bound.
+The settling loop is limited to 1,000 iterations by default, after the initial entry or event
+microstep. Initialization and `Transition` can therefore take at most 1,001 microsteps. If
+eventless transitions or raised events do not stabilize, the machine throws
+`InfiniteTransitionError` with the actor, event, limit, and five most recent states. Use
+`.MaxMicrosteps(n)` when building a machine that intentionally needs a higher bound.
 
 ## Effects
 
