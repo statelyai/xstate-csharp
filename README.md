@@ -56,11 +56,11 @@ virtual clock.
 
 <!-- macrostep loop protection from src/XState/StateMachine.Algorithm.cs, src/XState/Builder/MachineBuilder.cs and src/XState/InfiniteTransitionError.cs -->
 
-The settling loop is limited to 1,000 iterations by default, after the initial entry or event
-microstep. Initialization and `Transition` can therefore take at most 1,001 microsteps. If
-eventless transitions or raised events do not stabilize, the machine throws
-`InfiniteTransitionError` with the actor, event, limit, and up to five most recent states. Use
-`.MaxMicrosteps(n)` when building a machine that intentionally needs a higher bound.
+Macrosteps are unbounded by default, as in XState v6: the settling loop runs until eventless
+transitions and raised events stabilize. Use `.MaxMicrosteps(n)` when building a machine to limit
+the settling loop to `n` iterations after the initial entry or event microstep. A macrostep that
+exceeds the limit throws `InfiniteTransitionError` with the actor, event, limit, and up to five
+most recent states.
 
 ## Effects
 
@@ -82,8 +82,9 @@ references become addresses.
 <!-- logical timer identity from src/XState/TimerKey.cs and src/XState/StateMachine.Algorithm.cs -->
 
 Delays are logical timers. The machine records a `TimerKey` (explicit id, sequence, or event) on
-its `Timers` ledger; your clock reports that key elapsed with a `TimerEvent`. The machine ignores
-keys it no longer holds, so a cancel racing a firing is not a bug.
+its `Timers` ledger; your clock reports that key elapsed with a `TimerEvent` that echoes the
+scheduling's `Occurrence`. The machine ignores keys it no longer holds and occurrences a same-key
+replacement superseded, so a cancel racing a firing is not a bug.
 
 ## Durable execution
 
@@ -115,7 +116,7 @@ other operation throws by name rather than quietly running local behaviour.
 Persistence is pure: `machine.Persist(state)` yields plain data, and `machine.Restore(persisted)`
 returns the snapshot plus the children and timers the machine expects but cannot re-create.
 Restore refuses a snapshot from a different machine or version. `SnapshotJson` reads and writes
-xstate v6's `persisted-snapshot/v1` JSON.
+xstate v6's `persisted-snapshot/v1` JSON. No field name in it starts with `$` or `_`.
 
 - [`docs/durable-hosts.md`](docs/durable-hosts.md): host contract (identity, timers, effect ids, journaling, determinism, checkpoints)
 - [`docs/persistence.md`](docs/persistence.md): persist/restore, JSON, versions and migrations

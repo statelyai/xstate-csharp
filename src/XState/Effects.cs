@@ -77,6 +77,12 @@ public sealed record RaiseEffect(MachineEvent Event, string? Id, TimeSpan Delay)
     /// <summary>The timer sequence number stamped on an id-less, non-built-in delayed raise.</summary>
     public int? Seq { get; init; }
 
+    /// <summary>
+    /// The scheduling occurrence stamped on every delayed raise (<see cref="LogicalTimer.Occurrence"/>).
+    /// The host echoes it in the <see cref="TimerEvent"/> it sends when the timer fires.
+    /// </summary>
+    public int? Occurrence { get; init; }
+
     public override string Kind => "@xstate.raise";
 }
 
@@ -95,6 +101,12 @@ public sealed record SendToEffect(
 {
     /// <summary>The timer sequence number stamped on an id-less delayed send.</summary>
     public int? Seq { get; init; }
+
+    /// <summary>
+    /// The scheduling occurrence stamped on every delayed send (<see cref="LogicalTimer.Occurrence"/>).
+    /// The host echoes it in the <see cref="TimerEvent"/> it sends when the timer fires.
+    /// </summary>
+    public int? Occurrence { get; init; }
 
     public override string Kind => "@xstate.sendTo";
 }

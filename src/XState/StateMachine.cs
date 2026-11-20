@@ -51,11 +51,12 @@ public sealed partial class StateMachine<TContext> : IMachineLogic
     public IReadOnlySet<string> InternalEvents { get; init; } = new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>
-    /// Hard cap on the microsteps one macrostep may take before the machine is declared to be
-    /// looping: exceeding it throws <see cref="InfiniteTransitionError"/>. Named
-    /// <c>maxIterations</c> upstream (xstate v6 <c>options.maxIterations</c>, default 1000).
+    /// Optional cap on the microsteps one macrostep may take before the machine is declared to be
+    /// looping: exceeding it throws <see cref="InfiniteTransitionError"/>. <c>null</c> (the
+    /// default) leaves macrosteps unbounded. Named <c>maxIterations</c> upstream (xstate v6
+    /// <c>options.maxIterations</c>).
     /// </summary>
-    public int MaxMicrosteps { get; init; } = 1000;
+    public int? MaxMicrosteps { get; init; }
 
     /// <summary>
     /// Optional boundary check on incoming events. A non-null result rejects the event: the

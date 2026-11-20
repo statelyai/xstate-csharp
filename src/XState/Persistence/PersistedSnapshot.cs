@@ -65,9 +65,9 @@ public sealed record PersistedChild
     /// v6 persists a public <c>incarnation</c> only for remote handles (the schema requires
     /// <c>incarnation</c> ⇒ <c>remote</c>), because its token is a per-process <c>sessionId</c>.
     /// This port's incarnation is a deterministic per-snapshot counter, so it is durable data:
-    /// a remote child writes it as <c>incarnation</c>, an embedded child under the private key
-    /// <c>_incarnation</c> (port extension; dropping it would break done/error attribution after a
-    /// restore). Both keys are accepted on read.
+    /// a remote child writes it as <c>incarnation</c>, an embedded child as
+    /// <c>localIncarnation</c> (port extension; dropping it would break done/error attribution
+    /// after a restore). Both keys are accepted on read.
     /// </para>
     /// </summary>
     public string? Incarnation { get; init; }
@@ -86,11 +86,17 @@ public sealed record PersistedChild
 /// <summary>
 /// One entry of a persisted snapshot's timer ledger — a delayed raise or a delayed send the
 /// machine believes is still outstanding. Wire shape (<see cref="SnapshotJson"/>):
-/// <c>{ id?, seq?, delay, type, event, target, scheduledAt? }</c>.
+/// <c>{ occurrence?, id?, seq?, delay, type, event, target, scheduledAt? }</c>.
 /// </summary>
 [JsonConverter(typeof(PersistedTimerConverter))]
 public sealed record PersistedTimer
 {
+    /// <summary>
+    /// The scheduling occurrence (<see cref="LogicalTimer.Occurrence"/>). Absent on timers written
+    /// before occurrences existed; those restore with a null occurrence and fire by key alone.
+    /// </summary>
+    public int? Occurrence { get; init; }
+
     /// <summary>The explicit id the raise/send was scheduled with, if any.</summary>
     public string? Id { get; init; }
 
@@ -121,7 +127,7 @@ public sealed record PersistedTimer
 
     /// <summary>
     /// Set instead of <see cref="Target"/> when the wire target was a serialized actor reference
-    /// (<c>{ "$actor": address }</c>). Restore resolves it to the restored child with that address.
+    /// (<c>{ "@actor": address }</c>). Restore resolves it to the restored child with that address.
     /// </summary>
     public SerializedActorRef? TargetActor { get; init; }
 
@@ -139,10 +145,12 @@ public sealed record PersistedTimer
 /// the process that produced it (no delegates, no live actor references, no CLR exceptions).
 /// <para>
 /// Through <see cref="SnapshotJson"/> it serializes as v6's <c>persisted-snapshot/v1</c> envelope:
-/// <c>status</c>, <c>value</c>, <c>context</c>, <c>output</c>?, <c>error</c>?,
-/// <c>historyValue</c>, <c>stateInputs</c>?, <c>children</c>, <c>timers</c>, <c>machine</c>?,
-/// and the private counters <c>_nextActorIds</c>, <c>_nextTimerId</c>, <c>_nextIncarnation</c>.
-/// Unknown fields are ignored on read.
+/// <c>status</c>, <c>output</c>?, <c>error</c>?, <c>value</c>, <c>historyValue</c>,
+/// <c>context</c>, <c>children</c>, <c>timers</c>, <c>stateInputs</c>?, the private counters
+/// <c>nextTimerId</c>, <c>nextTimerOccurrence</c>?, <c>nextActorIds</c>? and <c>nextIncarnation</c>,
+/// and <c>machine</c>?.
+/// No field name starts with <c>$</c> or <c>_</c>, so document stores that reserve those
+/// prefixes accept the envelope. Unknown fields are ignored on read.
 /// </para>
 /// <para>
 /// Produced by <see cref="StateMachine{TContext}.Persist"/> and consumed by
@@ -161,12 +169,12 @@ public sealed record PersistedSnapshot
     public required string Status { get; init; }
 
     /// <summary>The machine's output when <see cref="Status"/> is <c>"done"</c>.</summary>
-    [JsonPropertyName("output"), JsonPropertyOrder(3)]
+    [JsonPropertyName("output"), JsonPropertyOrder(1)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public object? Output { get; init; }
 
     /// <summary>The failure when <see cref="Status"/> is <c>"error"</c>.</summary>
-    [JsonPropertyName("error"), JsonPropertyOrder(4)]
+    [JsonPropertyName("error"), JsonPropertyOrder(2)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PersistedError? Error { get; init; }
 
@@ -174,23 +182,23 @@ public sealed record PersistedSnapshot
     /// The nested state value (<see cref="State{TContext}.Value"/>): a string for a compound state
     /// whose active child is atomic, a map of region key → value otherwise.
     /// </summary>
-    [JsonPropertyName("value"), JsonPropertyOrder(1)]
+    [JsonPropertyName("value"), JsonPropertyOrder(3)]
     public required object Value { get; init; }
 
     /// <summary>
     /// The machine context, as-is. The host serializes it with its own options, and supplies
     /// <see cref="RestoreOptions{TContext}.ContextConverter"/> to turn whatever its deserializer
     /// produced back into <c>TContext</c>. A <see cref="SerializedActorRef"/> inside it is written
-    /// as <c>{ "$actor": address }</c> and read back as a <see cref="SerializedActorRef"/>.
+    /// as <c>{ "@actor": address }</c> and read back as a <see cref="SerializedActorRef"/>.
     /// </summary>
-    [JsonPropertyName("context"), JsonPropertyOrder(2)]
+    [JsonPropertyName("context"), JsonPropertyOrder(5)]
     public object? Context { get; init; }
 
     /// <summary>
     /// Children the snapshot believes are running, in spawn order. Written as an object keyed by
     /// child id.
     /// </summary>
-    [JsonPropertyName("children"), JsonPropertyOrder(7)]
+    [JsonPropertyName("children"), JsonPropertyOrder(6)]
     [JsonConverter(typeof(PersistedChildMapConverter))]
     public IReadOnlyList<PersistedChild> Children { get; init; } = [];
 
@@ -198,7 +206,7 @@ public sealed record PersistedSnapshot
     /// Outstanding logical timers, in scheduling order. The pre-alpha.68 shape — an object keyed
     /// by timer id — is rejected on deserialization.
     /// </summary>
-    [JsonPropertyName("timers"), JsonPropertyOrder(8)]
+    [JsonPropertyName("timers"), JsonPropertyOrder(7)]
     [JsonConverter(typeof(PersistedTimerListConverter))]
     public IReadOnlyList<PersistedTimer> Timers { get; init; } = [];
 
@@ -206,30 +214,57 @@ public sealed record PersistedSnapshot
     /// History node id → recorded state ids. Written as v6 <c>{ [historyId]: [{ "id": … }] }</c>
     /// (<c>State.ts</c> <c>serializeHistoryValue</c>).
     /// </summary>
-    [JsonPropertyName("historyValue"), JsonPropertyOrder(5)]
+    [JsonPropertyName("historyValue"), JsonPropertyOrder(4)]
     [JsonConverter(typeof(PersistedHistoryConverter))]
     public IReadOnlyDictionary<string, IReadOnlyList<string>> HistoryValue { get; init; } =
         new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
 
-    /// <summary>Generated-actor-id counters per prefix (<see cref="State{TContext}.NextActorIds"/>).</summary>
-    [JsonPropertyName("_nextActorIds"), JsonPropertyOrder(10)]
-    [JsonConverter(typeof(PersistedCounterMapConverter))]
+    /// <summary>
+    /// Generated-actor-id counters per prefix (<see cref="State{TContext}.NextActorIds"/>). Written
+    /// as <c>nextActorIds</c> only when non-empty (v6 <c>State.ts</c>); absent reads as empty.
+    /// </summary>
+    [JsonIgnore]
     public IReadOnlyDictionary<string, int> NextActorIds { get; init; } =
         new Dictionary<string, int>(StringComparer.Ordinal);
 
-    /// <summary>Next timer sequence number (<see cref="State{TContext}.NextTimerId"/>).</summary>
-    [JsonPropertyName("_nextTimerId"), JsonPropertyOrder(11)]
+    // The wire form of NextActorIds: null (omitted) when empty, so the envelope matches v6.
+    [JsonInclude, JsonPropertyName("nextActorIds"), JsonPropertyOrder(11)]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonConverter(typeof(PersistedCounterMapConverter))]
+    private IReadOnlyDictionary<string, int>? NextActorIdsJson
+    {
+        get => NextActorIds.Count == 0 ? null : NextActorIds;
+        init => NextActorIds = value ?? throw new InvalidSnapshotException(
+            "Persisted 'nextActorIds' must be an object of prefix → counter.");
+    }
+
+    /// <summary>
+    /// Next timer sequence number (<see cref="State{TContext}.NextTimerId"/>). On the wire it must
+    /// be a non-negative integer; restore raises it above every persisted timer's <c>seq</c>.
+    /// </summary>
+    [JsonPropertyName("nextTimerId"), JsonPropertyOrder(9)]
+    [JsonConverter(typeof(PersistedTimerIdCounterConverter))]
     public int NextTimerId { get; init; }
 
+    /// <summary>
+    /// Next timer scheduling occurrence (<see cref="State{TContext}.NextTimerOccurrence"/>). Written
+    /// only when greater than zero; absent reads as zero. On the wire it must be a non-negative
+    /// integer; restore raises it above every persisted timer's <c>occurrence</c>.
+    /// </summary>
+    [JsonPropertyName("nextTimerOccurrence"), JsonPropertyOrder(10)]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    [JsonConverter(typeof(PersistedTimerOccurrenceCounterConverter))]
+    public int NextTimerOccurrence { get; init; }
+
     /// <summary>Next child incarnation token (<see cref="State{TContext}.NextIncarnation"/>).</summary>
-    [JsonPropertyName("_nextIncarnation"), JsonPropertyOrder(12)]
+    [JsonPropertyName("nextIncarnation"), JsonPropertyOrder(12)]
     public int NextIncarnation { get; init; }
 
     /// <summary>
     /// Per-state input, written only when non-empty (v6 <c>State.ts</c>:704 writes
     /// <c>stateInputs</c> only for a non-empty map).
     /// </summary>
-    [JsonPropertyName("stateInputs"), JsonPropertyOrder(6)]
+    [JsonPropertyName("stateInputs"), JsonPropertyOrder(8)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyDictionary<string, object?>? StateInputs { get; init; }
 
@@ -237,7 +272,7 @@ public sealed record PersistedSnapshot
     /// The machine that produced this snapshot — written only when the machine declares a
     /// version (v6 <c>State.ts</c>), so an unversioned machine's snapshot carries none.
     /// </summary>
-    [JsonPropertyName("machine"), JsonPropertyOrder(9)]
+    [JsonPropertyName("machine"), JsonPropertyOrder(13)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PersistedMachineIdentity? Machine { get; init; }
 }
@@ -319,7 +354,7 @@ internal sealed class PersistedTimerListConverter : JsonConverter<IReadOnlyList<
     }
 }
 
-/// <summary>Reads <c>_nextActorIds</c>, rejecting <c>null</c> and non-object shapes as malformed.</summary>
+/// <summary>Reads <c>nextActorIds</c>, rejecting <c>null</c> and non-object shapes as malformed.</summary>
 internal sealed class PersistedCounterMapConverter : JsonConverter<IReadOnlyDictionary<string, int>>
 {
     public override bool HandleNull => true;
@@ -329,11 +364,11 @@ internal sealed class PersistedCounterMapConverter : JsonConverter<IReadOnlyDict
     {
         if (reader.TokenType is not JsonTokenType.StartObject)
         {
-            throw new InvalidSnapshotException("Persisted '_nextActorIds' must be an object of prefix → counter.");
+            throw new InvalidSnapshotException("Persisted 'nextActorIds' must be an object of prefix → counter.");
         }
 
         return JsonSerializer.Deserialize<Dictionary<string, int>>(ref reader, options)
-               ?? throw new InvalidSnapshotException("Persisted '_nextActorIds' must be an object of prefix → counter.");
+               ?? throw new InvalidSnapshotException("Persisted 'nextActorIds' must be an object of prefix → counter.");
     }
 
     public override void Write(Utf8JsonWriter writer, IReadOnlyDictionary<string, int> value, JsonSerializerOptions options)
@@ -346,3 +381,29 @@ internal sealed class PersistedCounterMapConverter : JsonConverter<IReadOnlyDict
         writer.WriteEndObject();
     }
 }
+
+/// <summary>
+/// Reads a timer counter (<c>nextTimerId</c>, <c>nextTimerOccurrence</c>) as a non-negative
+/// integer (v6 <c>persistedSnapshotValidation.ts</c>), rejecting negative, fractional and
+/// non-numeric values as malformed.
+/// </summary>
+internal abstract class PersistedTimerCounterConverter(string name) : JsonConverter<int>
+{
+    public override int Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType is JsonTokenType.Number && reader.TryGetDouble(out var value) &&
+            value >= 0 && value <= int.MaxValue && value == Math.Floor(value))
+        {
+            return (int)value;
+        }
+
+        throw new InvalidSnapshotException($"Persisted snapshot has an invalid timer counter '{name}'.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, int value, JsonSerializerOptions options) =>
+        writer.WriteNumberValue(value);
+}
+
+internal sealed class PersistedTimerIdCounterConverter() : PersistedTimerCounterConverter("nextTimerId");
+
+internal sealed class PersistedTimerOccurrenceCounterConverter() : PersistedTimerCounterConverter("nextTimerOccurrence");

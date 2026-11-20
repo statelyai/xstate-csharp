@@ -11,7 +11,7 @@ namespace XState;
 /// have neither — <see cref="ByEvent">their event</see>. Hosts key their scheduler by
 /// (source address, <see cref="Serialize"/>).
 /// </summary>
-[JsonPolymorphic(TypeDiscriminatorPropertyName = "$key")]
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "@key")]
 [JsonDerivedType(typeof(ById), "id")]
 [JsonDerivedType(typeof(BySeq), "seq")]
 [JsonDerivedType(typeof(ByEvent), "event")]

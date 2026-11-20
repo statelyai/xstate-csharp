@@ -38,11 +38,17 @@ public sealed record StopEvent : MachineEvent
 /// xstate.timer (v6 <c>XSTATE_TIMER</c>) — the host-neutral firing input for a logical timer
 /// the machine scheduled (a delayed raise or a delayed send-to). The host schedules nothing on
 /// the machine's behalf beyond the key: when the delay elapses it sends
-/// <c>TimerEvent(Key)</c> back to the actor that owns the timer, and the machine looks the key up
-/// in its own <see cref="State{TContext}.Timers"/> ledger. A key that matches nothing on the
-/// ledger is a stale firing and is ignored.
+/// <c>TimerEvent(Key, Occurrence)</c> back to the actor that owns the timer, and the machine looks
+/// the key up in its own <see cref="State{TContext}.Timers"/> ledger. A key that matches nothing
+/// on the ledger is a stale firing and is ignored.
 /// </summary>
-public sealed record TimerEvent(TimerKey Key) : MachineEvent
+/// <param name="Key">The logical key of the timer that elapsed.</param>
+/// <param name="Occurrence">
+/// The <see cref="RaiseEffect.Occurrence"/>/<see cref="SendToEffect.Occurrence"/> of the scheduling
+/// that elapsed. A firing whose occurrence differs from the ledger timer's is stale (that timer
+/// was cancelled or replaced under the same key) and is ignored. Null matches by key alone.
+/// </param>
+public sealed record TimerEvent(TimerKey Key, int? Occurrence = null) : MachineEvent
 {
     public override string Type => "xstate.timer";
 }

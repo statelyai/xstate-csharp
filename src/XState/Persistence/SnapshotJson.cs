@@ -10,7 +10,7 @@ namespace XState.Persistence;
 /// <c>docs/persistence.md</c> for the shape and the port's extensions).
 /// <para>
 /// Two things in a snapshot are not plain JSON on their own. <see cref="MachineEvent"/> is a
-/// polymorphic hierarchy, so an event is written with a <c>$event</c> discriminator carrying its
+/// polymorphic hierarchy, so an event is written with a <c>@event</c> discriminator carrying its
 /// CLR type name alongside the <c>type</c> the machine matches on. And the loosely typed payload
 /// slots (<see cref="PersistedSnapshot.Value"/>, <see cref="PersistedSnapshot.Context"/>,
 /// <see cref="PersistedSnapshot.Output"/>, event payloads) are <c>object</c>, which
@@ -52,7 +52,7 @@ public static class SnapshotJson
     /// </summary>
     /// <param name="eventTypes">
     /// Additional <see cref="MachineEvent"/> types to recognise by CLR name on the way back in.
-    /// Built-in events are always recognised; an event whose <c>$event</c> name is not registered
+    /// Built-in events are always recognised; an event whose <c>@event</c> name is not registered
     /// is read back as a <see cref="NamedEvent"/> keeping its <c>type</c> and its payload's raw
     /// JSON, so an unknown event is preserved rather than lost.
     /// </param>
@@ -167,7 +167,7 @@ public static class SnapshotJson
     }
 
     /// <summary>The discriminator property carrying an event's CLR type name.</summary>
-    internal const string Discriminator = "$event";
+    internal const string Discriminator = "@event";
 
     /// <summary>The canonical event type property — what the machine actually matches on.</summary>
     internal const string TypeProperty = "type";
@@ -245,12 +245,12 @@ public static class SnapshotJson
                 : null;
     }
 
-    /// <summary>The key of a serialized actor reference (v6 <c>{ $actor: address }</c>).</summary>
-    internal const string ActorRefKey = "$actor";
+    /// <summary>The key of a serialized actor reference (v6 <c>{ "@actor": address }</c>).</summary>
+    internal const string ActorRefKey = "@actor";
 
     /// <summary>
     /// Whether <paramref name="element"/> is exactly a serialized actor reference:
-    /// <c>$actor</c> plus, optionally, a string <c>incarnation</c>.
+    /// <c>@actor</c> plus, optionally, a string <c>incarnation</c>.
     /// </summary>
     internal static bool IsActorRef(JsonElement element)
     {
@@ -343,7 +343,7 @@ public static class SnapshotJson
     }
 }
 
-/// <summary>Writes <see cref="SerializedActorRef"/> as <c>{ "$actor": address, "incarnation"?: … }</c>.</summary>
+/// <summary>Writes <see cref="SerializedActorRef"/> as <c>{ "@actor": address, "incarnation"?: … }</c>.</summary>
 internal sealed class SerializedActorRefConverter : JsonConverter<SerializedActorRef>
 {
     public override SerializedActorRef Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
@@ -352,7 +352,7 @@ internal sealed class SerializedActorRefConverter : JsonConverter<SerializedActo
         var element = document.RootElement;
         if (element.ValueKind is not JsonValueKind.Object || !SnapshotJson.IsActorRef(element))
         {
-            throw new InvalidSnapshotException("A serialized actor reference must be { \"$actor\": address }.");
+            throw new InvalidSnapshotException("A serialized actor reference must be { \"@actor\": address }.");
         }
 
         return new SerializedActorRef(
@@ -416,12 +416,12 @@ internal sealed class PersistedChildMapConverter : JsonConverter<IReadOnlyList<P
 
 /// <summary>
 /// One <c>children</c> entry: <c>{ address, src?, registryKey?, syncSnapshot?, snapshot? | remote:
-/// true, incarnation? }</c>, plus the port's private <c>_incarnation</c> for an embedded child.
+/// true, incarnation? }</c>, plus the port's <c>localIncarnation</c> for an embedded child.
 /// The id is the entry's key, filled in by <see cref="PersistedChildMapConverter"/>.
 /// </summary>
 internal sealed class PersistedChildConverter : JsonConverter<PersistedChild>
 {
-    private const string PrivateIncarnation = "_incarnation";
+    private const string LocalIncarnation = "localIncarnation";
 
     public override PersistedChild Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
@@ -444,7 +444,7 @@ internal sealed class PersistedChildConverter : JsonConverter<PersistedChild>
                 ? snapshot.Deserialize<PersistedSnapshot>(options)
                 : null,
             Remote = remote,
-            Incarnation = JsonField.String(e, "incarnation") ?? JsonField.String(e, PrivateIncarnation)
+            Incarnation = JsonField.String(e, "incarnation") ?? JsonField.String(e, LocalIncarnation)
         };
     }
 
@@ -485,7 +485,7 @@ internal sealed class PersistedChildConverter : JsonConverter<PersistedChild>
 
             if (value.Incarnation is { } incarnation)
             {
-                writer.WriteString(PrivateIncarnation, incarnation);
+                writer.WriteString(LocalIncarnation, incarnation);
             }
         }
 
@@ -493,7 +493,9 @@ internal sealed class PersistedChildConverter : JsonConverter<PersistedChild>
     }
 }
 
-/// <summary>One <c>timers</c> entry: <c>{ id?, seq?, delay, type, event, target, scheduledAt? }</c>.</summary>
+/// <summary>
+/// One <c>timers</c> entry: <c>{ occurrence?, id?, seq?, delay, type, event, target, scheduledAt? }</c>.
+/// </summary>
 internal sealed class PersistedTimerConverter : JsonConverter<PersistedTimer>
 {
     public override PersistedTimer Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
@@ -555,8 +557,20 @@ internal sealed class PersistedTimerConverter : JsonConverter<PersistedTimer>
             seq = n;
         }
 
+        int? occurrence = null;
+        if (e.TryGetProperty("occurrence", out var o) && o.ValueKind is not JsonValueKind.Null)
+        {
+            if (o.ValueKind is not JsonValueKind.Number || !o.TryGetInt32(out var n) || n < 0)
+            {
+                throw new InvalidSnapshotException($"Persisted timer has invalid occurrence {o.GetRawText()}.");
+            }
+
+            occurrence = n;
+        }
+
         return new PersistedTimer
         {
+            Occurrence = occurrence,
             Id = JsonField.String(e, "id"),
             Seq = seq,
             DelayMs = delay.GetDouble(),
@@ -574,6 +588,11 @@ internal sealed class PersistedTimerConverter : JsonConverter<PersistedTimer>
     public override void Write(Utf8JsonWriter writer, PersistedTimer value, JsonSerializerOptions options)
     {
         writer.WriteStartObject();
+        if (value.Occurrence is { } occurrence)
+        {
+            writer.WriteNumber("occurrence", occurrence);
+        }
+
         if (value.Id is { } id)
         {
             writer.WriteString("id", id);

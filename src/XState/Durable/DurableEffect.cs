@@ -44,8 +44,11 @@ public interface IDurableExecution
     /// <summary>
     /// Reports an event addressed to the execution's root that the host produced while executing
     /// effects; <c>WaitForEvent</c> hands reported events out, in order, before parking on the host.
+    /// A report made during <c>ExecuteEffects</c> is kept only if that batch completes.
     /// </summary>
-    void ReportRootEvent(MachineEvent evt);
+    /// <param name="evt">The root-addressed event.</param>
+    /// <param name="source">The sender's durable identity, stored with the event in a checkpoint.</param>
+    void ReportRootEvent(MachineEvent evt, SerializedActorRef? source = null);
 }
 
 /// <summary>

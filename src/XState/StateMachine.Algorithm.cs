@@ -38,6 +38,12 @@ public sealed partial class StateMachine<TContext>
         public int NextTimerId { get; set; }
 
         /// <summary>
+        /// Next timer scheduling occurrence (xstate v6 <c>_nextTimerOccurrence</c>), stamped on
+        /// every delayed raise/send; carried across macrosteps on the snapshot.
+        /// </summary>
+        public int NextTimerOccurrence { get; set; }
+
+        /// <summary>
         /// Next child incarnation token (xstate v6 <c>matchesActorSession</c>): stamped on every
         /// spawn and echoed by the host on the child's done/error event.
         /// </summary>
@@ -185,13 +191,16 @@ public sealed partial class StateMachine<TContext>
     /// <summary>
     /// <c>xstate.timer</c> — the host reports that the timer with this key elapsed. A key that
     /// matches nothing on the ledger is a stale firing (the timer was cancelled, or its state exited)
-    /// and changes nothing. Otherwise the timer is struck off and its event delivered: a
+    /// and changes nothing. So is a firing whose occurrence differs from the matching timer's: it
+    /// belongs to a scheduling that a same-key replacement superseded. A firing without an
+    /// occurrence matches by key alone. Otherwise the timer is struck off and its event delivered: a
     /// <see cref="TimerKind.Raise"/> onto the internal queue, a <see cref="TimerKind.SendTo"/> as
     /// an immediate send (stateUtils.ts `macrostep`, the XSTATE_TIMER branch).
     /// </summary>
     private TransitionResult<TContext> FireTimer(Run run, State<TContext> state, TimerEvent evt)
     {
-        var timer = run.Timers.FirstOrDefault(evt.Key.Matches);
+        var timer = run.Timers.FirstOrDefault(t =>
+            evt.Key.Matches(t) && (evt.Occurrence is null || t.Occurrence == evt.Occurrence));
         if (timer is null)
         {
             return new TransitionResult<TContext>(state, []);
@@ -286,6 +295,7 @@ public sealed partial class StateMachine<TContext>
             Output = state.Output,
             Error = state.Error,
             NextTimerId = state.NextTimerId,
+            NextTimerOccurrence = state.NextTimerOccurrence,
             NextIncarnation = state.NextIncarnation
         };
 
@@ -334,6 +344,7 @@ public sealed partial class StateMachine<TContext>
                 Machine = this,
                 NextActorIds = run.NextActorIds.ToImmutableDictionary(StringComparer.Ordinal),
                 NextTimerId = run.NextTimerId,
+                NextTimerOccurrence = run.NextTimerOccurrence,
                 NextIncarnation = run.NextIncarnation,
                 Children = [.. run.Children],
                 Timers = [.. run.Timers],
@@ -346,7 +357,9 @@ public sealed partial class StateMachine<TContext>
     private void Settle(Run run, MachineEvent evt)
     {
         var nextEvent = evt;
-        var shouldSelectEventless = true;
+        // A timer notification must not run eventless transitions before its delayed event is
+        // delivered (stateUtils.ts `macrostep`).
+        var shouldSelectEventless = evt is not TimerEvent;
         var iterations = 0;
         // The last few state values visited, for the infinite-loop error (stateUtils.ts macrostep).
         var recentStates = new List<object>();
@@ -355,7 +368,7 @@ public sealed partial class StateMachine<TContext>
         {
             if (++iterations > MaxMicrosteps)
             {
-                throw new InfiniteTransitionError(Id, evt, MaxMicrosteps, recentStates);
+                throw new InfiniteTransitionError(Id, evt, MaxMicrosteps.Value, recentStates);
             }
 
             var enabled = shouldSelectEventless ? SelectEventlessTransitions(run, nextEvent) : [];
@@ -611,8 +624,9 @@ public sealed partial class StateMachine<TContext>
 
     /// <summary>
     /// Records an effect and keeps the child/timer bookkeeping in sync. The recorded effect may
-    /// differ from the one passed in (a spawn is stamped with its incarnation token; an id-less,
-    /// non-built-in delayed raise/send is stamped with the next timer sequence number).
+    /// differ from the one passed in (a spawn is stamped with its incarnation token; a delayed
+    /// raise/send is stamped with the next timer occurrence and, when id-less and not built-in,
+    /// the next timer sequence number).
     /// </summary>
     private static Effect Emit(Run run, Effect effect)
     {
@@ -660,29 +674,33 @@ public sealed partial class StateMachine<TContext>
             case RaiseEffect raise:
             {
                 var seq = NextSeq(run, raise.Id, raise.Event);
-                if (seq is not null)
-                {
-                    effect = raise with { Seq = seq };
-                }
+                var occurrence = run.NextTimerOccurrence++;
+                effect = raise with { Seq = seq ?? raise.Seq, Occurrence = occurrence };
 
-                ScheduleTimer(run, new LogicalTimer(raise.Id, seq, raise.Delay, TimerKind.Raise, raise.Event, null));
+                ScheduleTimer(
+                    run,
+                    new LogicalTimer(raise.Id, seq, raise.Delay, TimerKind.Raise, raise.Event, null)
+                    {
+                        Occurrence = occurrence
+                    });
                 break;
             }
 
             case SendToEffect { Delay: not null } send:
             {
                 var seq = NextSeq(run, send.Id, send.Event);
-                if (seq is not null)
-                {
-                    effect = send with { Seq = seq };
-                }
+                var occurrence = run.NextTimerOccurrence++;
+                effect = send with { Seq = seq ?? send.Seq, Occurrence = occurrence };
 
                 // The timer lives on the *sender*; `null` records "deliver to myself", matching
                 // v6's `target === self ? 'self' : target` normalisation.
                 var target = send.Target == EffectTarget.Self ? null : send.Target;
                 ScheduleTimer(
                     run,
-                    new LogicalTimer(send.Id, seq, send.Delay.Value, TimerKind.SendTo, send.Event, target));
+                    new LogicalTimer(send.Id, seq, send.Delay.Value, TimerKind.SendTo, send.Event, target)
+                    {
+                        Occurrence = occurrence
+                    });
                 break;
             }
 

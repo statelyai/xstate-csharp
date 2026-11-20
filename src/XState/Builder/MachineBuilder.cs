@@ -23,7 +23,7 @@ public sealed class MachineBuilder<TContext>
     private bool _deferInvokes;
     private bool _ignoreUnhandledErrors;
     private string? _version;
-    private int _maxMicrosteps = 1000;
+    private int? _maxMicrosteps;
     private Func<MachineEvent, Exception?>? _eventValidator;
     private readonly Dictionary<string, ActionDefinition<TContext>> _actions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Guard<TContext>> _guards = new(StringComparer.Ordinal);
@@ -123,7 +123,8 @@ public sealed class MachineBuilder<TContext>
 
     /// <summary>
     /// Caps the microsteps one macrostep may take before the machine is declared to be looping
-    /// (xstate v6's hard cap is 1000).
+    /// and throws <see cref="InfiniteTransitionError"/>. Macrosteps are unbounded without it
+    /// (xstate v6 <c>options.maxIterations</c>).
     /// </summary>
     public MachineBuilder<TContext> MaxMicrosteps(int max)
     {

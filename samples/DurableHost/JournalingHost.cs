@@ -157,8 +157,10 @@ public sealed class JournalingHost : IDurableHost
 
         _timers[(effect.Source, id)] = cts;
 
-        // When it elapses, the host tells the actor which key fired — nothing more. The machine
-        // looks the key up on its own ledger and decides what firing means.
+        // When it elapses, the host tells the actor which key and occurrence fired, nothing more.
+        // The machine looks the key up on its own ledger and decides what firing means; an
+        // occurrence a replacement superseded is ignored.
+        var occurrence = effect.Descriptor.Occurrence;
         _ = Task.Delay(delay, cts.Token).ContinueWith(
             task =>
             {
@@ -166,7 +168,7 @@ public sealed class JournalingHost : IDurableHost
                 // the machine: the key may now name a rescheduled timer and would fire it early.
                 if (task.IsCompletedSuccessfully && !cts.IsCancellationRequested)
                 {
-                    _mailbox.Writer.TryWrite(new TimerEvent(key));
+                    _mailbox.Writer.TryWrite(new TimerEvent(key, occurrence));
                 }
             },
             TaskScheduler.Default);
