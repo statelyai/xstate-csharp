@@ -17,7 +17,7 @@
   <PropertyGroup>
     <!-- Release version. Managed by Release Please (.github/workflows/release-please.yml):
          merge the release PR to bump this, tag, and publish to NuGet. -->
-    <Version>0.1.0-alpha</Version>
+    <Version>0.1.0-alpha.1</Version>
     <Authors>Stately</Authors>
     <Company>Stately</Company>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -40,11 +40,11 @@
 
   <ItemGroup>
     <!-- Packed at the package root so nuget.org renders it; a no-op for IsPackable=false projects. -->
-    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="/" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="/" Visible="false"/>
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.401" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.401" PrivateAssets="All"/>
   </ItemGroup>
 
 </Project>
