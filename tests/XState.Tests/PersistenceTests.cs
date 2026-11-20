@@ -1,6 +1,6 @@
 using System.Text.Json;
-using Xunit;
 using XState.Persistence;
+using Xunit;
 
 namespace XState.Tests;
 
@@ -115,7 +115,7 @@ public class PersistenceTests
         var options = SnapshotJson.DefaultOptions();
         var json = JsonSerializer.Serialize<MachineEvent>(new Ping(), options);
 
-        Assert.Contains("\"$event\":\"Ping\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"@event\":\"Ping\"", json, StringComparison.Ordinal);
 
         // Nothing registered `Ping`, so it reads back as the type the machine matches on, with the
         // payload kept verbatim rather than dropped.

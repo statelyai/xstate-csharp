@@ -33,10 +33,11 @@ public interface IDurableHost
 
     /// <summary>
     /// Arms a timer on the actor at <see cref="DurableEffect.Source"/>. When it elapses the host
-    /// sends that actor <see cref="TimerEvent"/> with <paramref name="key"/>; the machine decides
-    /// what firing means, and ignores a key it no longer holds. Hosts key their schedule by
-    /// (<see cref="DurableEffect.Source"/>, <see cref="TimerKey.Serialize"/>): scheduling an
-    /// already-armed key replaces it. The originating effect (a
+    /// sends that actor <see cref="TimerEvent"/> with <paramref name="key"/> and the effect's
+    /// occurrence (<see cref="EffectDescriptor.Occurrence"/>); the machine decides what firing
+    /// means, and ignores a key it no longer holds or an occurrence a replacement superseded. Hosts
+    /// key their schedule by (<see cref="DurableEffect.Source"/>, <see cref="TimerKey.Serialize"/>),
+    /// without the occurrence: scheduling an already-armed key replaces it. The originating effect (a
     /// <see cref="RaiseEffect"/> or a delayed <see cref="SendToEffect"/>) is passed so the host can
     /// journal the operation under <see cref="DurableEffect.Id"/> like every other one.
     /// </summary>

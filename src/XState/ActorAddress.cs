@@ -53,7 +53,7 @@ public static class ActorAddress
 
 /// <summary>
 /// An actor reference reduced to its durable identity — xstate v6 <c>SerializedActorRef</c>,
-/// written as <c>{ "$actor": address, "incarnation"?: … }</c>. It is how an actor ref inside a
+/// written as <c>{ "@actor": address, "incarnation"?: … }</c>. It is how an actor ref inside a
 /// persisted <c>context</c> (or a timer target) crosses a process boundary;
 /// <see cref="Persistence.SnapshotJson"/> reads any such object back as this record.
 /// </summary>

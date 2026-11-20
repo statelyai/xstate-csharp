@@ -198,9 +198,10 @@ public class CoreTransitionTests
     }
 
     [Fact]
-    public void Always_cycles_throw_instead_of_hanging()
+    public void Always_cycles_throw_when_a_microstep_bound_is_set()
     {
         var machine = Machine.Create("loop")
+            .MaxMicrosteps(1000)
             .Initial("a")
             .State("a", s => s.Always(t => t.Target("b")))
             .State("b", s => s.Always(t => t.Target("a")))
@@ -212,6 +213,25 @@ public class CoreTransitionTests
         Assert.Equal("xstate.init", ex.Event.Type);
         Assert.Equal(1000, ex.MaxIterations);
         Assert.Equal(["a", "b", "a", "b", "a"], ex.States);
+    }
+
+    [Fact]
+    public void Macrosteps_are_unbounded_by_default()
+    {
+        var machine = Machine.Create<Counter>("long")
+            .Context(_ => new Counter(0))
+            .Initial("a")
+            .State("a", s => s
+                .Always(t => t.Guard(a => a.Context.Count < 5000).Target("b").Assign(a => a.Context with { Count = a.Context.Count + 1 }))
+                .Always(t => t.Target("done")))
+            .State("b", s => s.Always(t => t.Target("a")))
+            .State("done")
+            .Build();
+
+        Assert.Null(machine.MaxMicrosteps);
+        var initial = machine.GetInitialState().State;
+        Assert.True(initial.Matches("done"));
+        Assert.Equal(5000, initial.Context.Count);
     }
 
     // --- 5. Raised events ---

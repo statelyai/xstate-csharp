@@ -17,7 +17,7 @@ internal static class MachineResolver
         bool ignoreUnhandledErrors = false,
         string? version = null,
         IReadOnlyDictionary<string, IActorLogic>? sources = null,
-        int maxMicrosteps = 1000,
+        int? maxMicrosteps = null,
         Func<MachineEvent, Exception?>? eventValidator = null,
         IReadOnlyDictionary<string, ActionDefinition<TContext>>? actions = null,
         IReadOnlyDictionary<string, Guard<TContext>>? guards = null,

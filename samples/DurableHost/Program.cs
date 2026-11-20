@@ -5,13 +5,6 @@ using XState.Persistence;
 
 namespace XState.Samples.DurableHost;
 
-/// <summary>
-/// What the host writes after every batch of effects: the snapshot, and where the journal's
-/// numbering had got to. Both are needed — the snapshot says where the machine is, the transition
-/// index says which effect ids the next worker may hand out.
-/// </summary>
-public sealed record Checkpoint(int NextTransitionIndex, PersistedSnapshot Snapshot);
-
 public static class Program
 {
     private static readonly JsonSerializerOptions Json =
@@ -37,7 +30,7 @@ public static class Program
 
         try
         {
-            await Drive(machine, execution, state, effects, path);
+            await Drive(execution, state, effects, path);
         }
         catch (WorkerCrashedException crash)
         {
@@ -46,31 +39,28 @@ public static class Program
 
         // --- Worker 2 -------------------------------------------------------------------------
         // A different worker, a different host, the same journal. It reads the checkpoint, restores
-        // the snapshot, re-arms what the machine says is outstanding, and carries on.
+        // it on a fresh execution, re-arms what the machine says is outstanding, and carries on.
 
         Console.WriteLine("\nworker 2");
-        var checkpoint = JsonSerializer.Deserialize<Checkpoint>(File.ReadAllText(path), Json)!;
-
-        var restored = machine.Restore(
-            checkpoint.Snapshot,
-            new RestoreOptions<OrderContext> { ContextConverter = ReadContext });
+        var checkpoint = JsonSerializer.Deserialize<DurableCheckpoint>(File.ReadAllText(path), Json)!;
 
         var resumedHost = new JournalingHost();
-        var resumed = new DurableExecution<OrderContext>(
-            machine,
-            resumedHost,
-            // Effect ids continue where the journal left off instead of colliding with it.
-            new DurableExecutionOptions { TransitionIndex = checkpoint.NextTransitionIndex });
+        var resumed = new DurableExecution<OrderContext>(machine, resumedHost);
 
-        Console.WriteLine($"    restored at {restored.State.Value}, context {restored.State.Context}");
+        // Effect ids continue from the checkpoint's `NextTransitionIndex`, and `WaitForEvent`
+        // hands out its inbox before parking on the host.
+        var (restored, restoreEffects, children) = resumed.Restore(
+            checkpoint,
+            new RestoreOptions<OrderContext> { ContextConverter = ReadContext });
 
-        // `Restore` hands back the two things the machine believes exist but cannot re-create
-        // itself: its children, and its timers. This checkpoint has no live child (the payment
-        // actor completed before the crash) and one timer to re-arm.
-        resumedHost.AttachRestoredChildren(restored.Children);
-        await resumed.RearmTimers(restored.Timers);
+        Console.WriteLine($"    restored at {restored.Value}, context {restored.Context}");
 
-        var final = await Drive(machine, resumed, restored.State, [], path);
+        // The pure core cannot re-create children, so the host re-attaches them. This checkpoint
+        // has no live child (the payment actor completed before the crash). `restoreEffects`
+        // re-arms its one timer; `Drive` executes it before waiting.
+        resumedHost.AttachRestoredChildren(children);
+
+        var final = await Drive(resumed, restored, restoreEffects, path);
 
         Console.WriteLine($"\ndone     status={final.Status} output={final.Output}");
         File.Delete(path);
@@ -83,7 +73,6 @@ public static class Program
     /// beginning.
     /// </summary>
     private static async Task<State<OrderContext>> Drive(
-        StateMachine<OrderContext> machine,
         DurableExecution<OrderContext> execution,
         State<OrderContext> state,
         IReadOnlyList<DurableEffect> effects,
@@ -92,7 +81,7 @@ public static class Program
         // Checkpoint *after* the effects: "effects executed" is what makes a snapshot safe to
         // resume from.
         await execution.ExecuteEffects(effects);
-        Save(machine, execution, state, path);
+        Save(execution, state, path);
 
         while (state.Status is SnapshotStatus.Active)
         {
@@ -102,15 +91,17 @@ public static class Program
 
             (state, effects) = execution.Transition(state, evt);
             await execution.ExecuteEffects(effects);
-            Save(machine, execution, state, path);
+            Save(execution, state, path);
         }
 
         return state;
     }
 
-    /// <summary>Writes the checkpoint. Plain JSON — no delegates, no live references.</summary>
+    /// <summary>
+    /// Writes the checkpoint: the snapshot, the next transition index and the inbox of root events
+    /// not yet processed. Plain JSON, no delegates, no live references.
+    /// </summary>
     private static void Save(
-        StateMachine<OrderContext> machine,
         DurableExecution<OrderContext> execution,
         State<OrderContext> state,
         string path)
@@ -119,11 +110,9 @@ public static class Program
         // embedding needs the host to supply each child's snapshot through
         // `PersistOptions.ChildSnapshot`. This host runs its child in-process and has nothing
         // durable to hand over.
-        var snapshot = machine.Persist(state, new PersistOptions { EmbedChildren = false });
+        var checkpoint = execution.Checkpoint(state, new PersistOptions { EmbedChildren = false });
 
-        File.WriteAllText(
-            path,
-            JsonSerializer.Serialize(new Checkpoint(execution.NextTransitionIndex, snapshot), Json));
+        File.WriteAllText(path, JsonSerializer.Serialize(checkpoint, Json));
     }
 
     /// <summary>

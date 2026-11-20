@@ -35,6 +35,12 @@ public sealed record EffectDescriptor(
     string? Error,
     string? Reason)
 {
+    /// <summary>The timer sequence number of an id-less delayed raise/send, if any.</summary>
+    public int? Seq { get; init; }
+
+    /// <summary>The scheduling occurrence of a delayed raise/send, if any.</summary>
+    public int? Occurrence { get; init; }
+
     /// <summary>
     /// Projects <paramref name="effect"/>, produced by the actor at
     /// <paramref name="sourceAddress"/>, onto its serializable descriptor.
@@ -67,7 +73,9 @@ public sealed record EffectDescriptor(
                 Source = sourceAddress,
                 Id = e.Id,
                 Event = e.Event,
-                Delay = e.Delay
+                Delay = e.Delay,
+                Seq = e.Seq,
+                Occurrence = e.Occurrence
             },
 
             SendToEffect e => Empty(e) with
@@ -76,7 +84,9 @@ public sealed record EffectDescriptor(
                 Target = ResolveAddress(sourceAddress, e.Target),
                 Id = e.Id,
                 Event = e.Event,
-                Delay = e.Delay
+                Delay = e.Delay,
+                Seq = e.Seq,
+                Occurrence = e.Occurrence
             },
 
             CancelEffect e => Empty(e) with

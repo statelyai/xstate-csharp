@@ -59,15 +59,19 @@ public sealed record RestoreResult<TContext>(
 Bring them back before you resume. Each `ChildToRestore` carries its id, address, incarnation and
 either the `Logic` to re-create (resolved from the machine's registered sources) or `Remote = true`
 for one to re-attach to. `Timers` is in scheduling order; each `LogicalTimer` carries the `Key` to
-re-arm, its declared delay, and the host-supplied `ScheduledAt` (Unix ms) if one was persisted —
-the core never sets it:
+re-arm, its scheduling `Occurrence`, its declared delay, and the host-supplied `ScheduledAt` (Unix
+ms) if one was persisted. The core never sets `ScheduledAt`. Re-arm each timer with its
+occurrence so its firing still matches it:
 
 ```csharp
 foreach (var timer in restored.Timers)
 {
-    await resumedHost.ScheduleTimer(resumed.RootAddress, timer.Key, timer.Delay);
+    await resumedHost.ScheduleTimer(resumed.RootAddress, timer.Key, timer.Occurrence, timer.Delay);
 }
 ```
+
+`DurableExecution.RearmTimers(restored.Timers)` does this through `IDurableHost.ScheduleTimer`,
+with the occurrence on the re-armed effect.
 
 Restoring folds the counters forward, so a generated id a restored snapshot already used is never
 handed out again:
@@ -88,27 +92,28 @@ port writes validates against the upstream schema and an upstream snapshot reads
 {
   "status": "active",
   "value": { "shop": "cart" },
-  "context": { "count": 1, "peer": { "$actor": "job/w" } },
   "historyValue": { "job.shop.hist": [{ "id": "job.shop.cart" }] },
-  "stateInputs": { "job.shop": { "n": 2 } },
+  "context": { "count": 1, "peer": { "@actor": "job/w" } },
   "children": {
     "w": {
       "address": "job/w",
       "src": "worker",
       "syncSnapshot": true,
-      "snapshot": { "status": "active", "value": "busy", "context": null, "historyValue": {}, "children": {}, "timers": [], "_nextActorIds": {}, "_nextTimerId": 0, "_nextIncarnation": 0 },
-      "_incarnation": "0"
+      "snapshot": { "status": "active", "value": "busy", "historyValue": {}, "context": null, "children": {}, "timers": [], "nextTimerId": 0, "nextIncarnation": 0 },
+      "localIncarnation": "0"
     },
     "r": { "address": "job/r", "src": "remote", "remote": true, "incarnation": "1" }
   },
   "timers": [
-    { "seq": 0, "delay": 500, "type": "@xstate.sendTo", "event": { "type": "ping", "$event": "NamedEvent", "Name": "ping", "Data": null }, "target": { "type": "parent" }, "scheduledAt": 1234 },
-    { "delay": 5000, "type": "@xstate.raise", "event": { "type": "xstate.after", "$event": "AfterEvent", "Delay": "5000", "StateId": "job.shop" }, "target": "self" }
+    { "occurrence": 0, "seq": 0, "delay": 500, "type": "@xstate.sendTo", "event": { "type": "ping", "@event": "NamedEvent", "Name": "ping", "Data": null }, "target": { "type": "parent" }, "scheduledAt": 1234 },
+    { "occurrence": 1, "delay": 5000, "type": "@xstate.raise", "event": { "type": "xstate.after", "@event": "AfterEvent", "Delay": "5000", "StateId": "job.shop" }, "target": "self" }
   ],
-  "machine": { "id": "job", "version": "1.0.0" },
-  "_nextActorIds": { "x": 1 },
-  "_nextTimerId": 1,
-  "_nextIncarnation": 2
+  "stateInputs": { "job.shop": { "n": 2 } },
+  "nextTimerId": 1,
+  "nextTimerOccurrence": 2,
+  "nextActorIds": { "x": 1 },
+  "nextIncarnation": 2,
+  "machine": { "id": "job", "version": "1.0.0" }
 }
 ```
 
@@ -116,26 +121,38 @@ port writes validates against the upstream schema and an upstream snapshot reads
   carries `remote: true` and no snapshot. An inline invoke omits `src` and restores through the
   active invoke definition with that id; zero or several matching invokes is an error.
 - `timers` is in scheduling order. `target` is `"self"`, a child id, `{ "type": "parent" }`, or a
-  serialized actor ref `{ "$actor": address }` resolved to the restored child at that address.
+  serialized actor ref `{ "@actor": address }` resolved to the restored child at that address.
 - `machine` is written only when the machine declares a version; when present it needs both keys.
-- `stateInputs`, `output` and `error` are omitted when empty.
-- A `SerializedActorRef` in `context` writes as `{ "$actor": address }` and reads back as a
+- `stateInputs`, `output`, `error` and `nextActorIds` are omitted when empty. An absent
+  `nextActorIds` reads as empty.
+- `nextTimerId` must be a non-negative integer. Restore raises it above every persisted timer's
+  `seq`, so a new id-less timer never reuses a pending one's number.
+- Each timer writes `occurrence`, the identity of its scheduling, as its first field. It must be a
+  non-negative integer. A timer without one (written before occurrences existed) restores with a
+  null `Occurrence` and fires by key alone.
+- `nextTimerOccurrence` is written after `nextTimerId`, and only when greater than zero; absent
+  reads as zero. It must be a non-negative integer. Restore raises it above every persisted
+  timer's `occurrence`, so a replacement scheduled after restore never shares a pending timer's
+  occurrence.
+- No field name starts with `$` or `_`, so document stores that reserve those prefixes accept the
+  envelope.
+- A `SerializedActorRef` in `context` writes as `{ "@actor": address }` and reads back as a
   `SerializedActorRef`; the port has no live actor refs to rebind it to. A circular context throws.
 - Unknown fields on the envelope, children and timers are ignored. Malformed JSON, or JSON of the
   wrong shape, throws `InvalidSnapshotException`.
 
 Port extensions, all legal under the schema:
 
-- `_incarnation` on an embedded child: this port's incarnation token is deterministic, so it is
+- `localIncarnation` on an embedded child: this port's incarnation token is deterministic, so it is
   durable data. v6 writes a public `incarnation` only for remote children, and so does this port.
 - A string timer target other than `self` or a child id (for example `#_registry:key`) is written
   verbatim; v6 has no counterpart.
 - `scheduledAt` is host-supplied: the pure core never sets it, only carries it through.
-- Events carry a `$event` CLR type discriminator next to `type`; see below.
+- Events carry an `@event` CLR type discriminator next to `type`; see below.
 
 Two things in a snapshot are not plain JSON on their own, and these options handle them.
 
-`MachineEvent` is a polymorphic hierarchy, so an event is written with a `$event` discriminator
+`MachineEvent` is a polymorphic hierarchy, so an event is written with an `@event` discriminator
 carrying its CLR type name alongside the `type` the machine matches on. Pass your own event types
 to have them read back as themselves; an unregistered one comes back as a `NamedEvent` keeping its
 `type` and its payload's raw JSON, so an event this process has no type for is preserved rather

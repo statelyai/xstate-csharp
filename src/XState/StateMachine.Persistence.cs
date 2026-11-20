@@ -101,6 +101,7 @@ public sealed partial class StateMachine<TContext>
 
             timers.Add(new PersistedTimer
             {
+                Occurrence = timer.Occurrence,
                 Id = timer.Id,
                 Seq = timer.Seq,
                 DelayMs = timer.Delay.TotalMilliseconds,
@@ -136,6 +137,7 @@ public sealed partial class StateMachine<TContext>
             HistoryValue = history,
             NextActorIds = new Dictionary<string, int>(state.NextActorIds, StringComparer.Ordinal),
             NextTimerId = state.NextTimerId,
+            NextTimerOccurrence = state.NextTimerOccurrence,
             NextIncarnation = state.NextIncarnation,
             // v6 State.ts:704-706 writes `stateInputs` only when the map has entries.
             StateInputs = state.StateInputs.IsEmpty
@@ -234,6 +236,11 @@ public sealed partial class StateMachine<TContext>
                 throw new InvalidSnapshotException($"Persisted timer has invalid type '{persisted.Type}'.");
             }
 
+            if (persisted.Occurrence is < 0)
+            {
+                throw new InvalidSnapshotException($"Persisted timer has invalid occurrence {persisted.Occurrence}.");
+            }
+
             string? target = persisted.Target;
             if (persisted.TargetActor is { } actorRef)
             {
@@ -273,6 +280,7 @@ public sealed partial class StateMachine<TContext>
                 evt,
                 target)
             {
+                Occurrence = persisted.Occurrence,
                 ScheduledAt = persisted.ScheduledAt
             });
         }
@@ -310,6 +318,26 @@ public sealed partial class StateMachine<TContext>
             }
         }
 
+        // v6 persist/index.ts: the timer counter must be a non-negative integer, and restore
+        // raises it above every persisted timer's seq so a new id-less timer never reuses one.
+        if (snapshot.NextTimerId < 0)
+        {
+            throw new InvalidSnapshotException("Persisted snapshot has an invalid timer counter 'nextTimerId'.");
+        }
+
+        var nextTimerId = timers.Aggregate(snapshot.NextTimerId, (next, t) => t.Seq is { } seq ? Math.Max(next, seq + 1) : next);
+
+        // The occurrence counter follows the same rule, so a restored replacement never reuses a
+        // pending timer's occurrence and a stale firing of that timer cannot fire it.
+        if (snapshot.NextTimerOccurrence < 0)
+        {
+            throw new InvalidSnapshotException("Persisted snapshot has an invalid timer counter 'nextTimerOccurrence'.");
+        }
+
+        var nextTimerOccurrence = timers.Aggregate(
+            snapshot.NextTimerOccurrence,
+            (next, t) => t.Occurrence is { } occurrence ? Math.Max(next, occurrence + 1) : next);
+
         var state = new State<TContext>
         {
             Configuration = configuration,
@@ -322,7 +350,8 @@ public sealed partial class StateMachine<TContext>
             HistoryValue = history.ToImmutable(),
             Machine = this,
             NextActorIds = nextActorIds.ToImmutableDictionary(StringComparer.Ordinal),
-            NextTimerId = snapshot.NextTimerId,
+            NextTimerId = nextTimerId,
+            NextTimerOccurrence = nextTimerOccurrence,
             NextIncarnation = snapshot.NextIncarnation,
             Children = [.. children.Select(c => new ChildRecord(c.Id, c.Src, c.Incarnation, c.SyncSnapshot))],
             Timers = [.. timers],

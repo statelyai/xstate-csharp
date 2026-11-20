@@ -36,6 +36,15 @@ public sealed record LogicalTimer(
     public TimerKey Key => TimerKey.For(this);
 
     /// <summary>
+    /// Identity of this scheduling (xstate v6 <c>occurrence</c>), from
+    /// <see cref="State{TContext}.NextTimerOccurrence"/>. A replacement under the same
+    /// <see cref="Key"/> gets a new occurrence, so a firing of the replaced timer that arrives late
+    /// cannot fire it. Null for a timer restored from a snapshot written before occurrences
+    /// existed; such a timer matches a firing by key alone. Not part of <see cref="Key"/>.
+    /// </summary>
+    public int? Occurrence { get; init; }
+
+    /// <summary>
     /// The timer's absolute start in Unix milliseconds, as a host recorded it
     /// (<see cref="Persistence.PersistedTimer.ScheduledAt"/>). The pure core never sets it; it
     /// only carries it through restore so a host can re-arm against the original deadline.
@@ -106,6 +115,14 @@ public sealed record State<TContext> : ISnapshot
     /// (<c>transitionActions.ts</c>).
     /// </summary>
     public int NextTimerId { get; internal init; }
+
+    /// <summary>
+    /// Next timer scheduling occurrence (<see cref="LogicalTimer.Occurrence"/>), stamped on every
+    /// delayed raise/send, built-in <c>after</c>/<c>timeout</c> timers included; monotonic across
+    /// macrosteps and independent of <see cref="NextTimerId"/>. xstate v6 counterpart:
+    /// <c>_nextTimerOccurrence</c>.
+    /// </summary>
+    public int NextTimerOccurrence { get; internal init; }
 
     /// <summary>
     /// Next child incarnation token. Every spawn stamps

@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Runtime.CompilerServices;
+using XState.Persistence;
 
 namespace XState.Durable;
 
@@ -47,19 +49,33 @@ public sealed record DurableExecutionOptions
 /// operations that child actors initiate while reacting, and captures root-addressed events as
 /// they are produced. This port has no runtime — effects are dispatched one at a time, in
 /// initiation order, and a host that produces a root-addressed event along the way reports it with
-/// <see cref="ReportRootEvent"/>.
+/// <see cref="ReportRootEvent"/>. v6's <c>captureRootEvents: false</c> needs no option here: a
+/// host that owns a single FIFO mailbox does not call <see cref="ReportRootEvent"/>, and feeds
+/// <see cref="WaitForEvent"/> from that mailbox itself.
 /// </para>
 /// </summary>
 public sealed class DurableExecution<TContext> : IDurableExecution
 {
     private readonly StateMachine<TContext> _machine;
     private readonly IDurableHost _host;
-    private readonly Queue<MachineEvent> _rootEvents = new();
-    private readonly int _startingTransitionIndex;
+    private readonly int _configuredTransitionIndex;
 
+    // Root events captured by settled batches (or reported outside any batch), waiting for the
+    // drive loop to take them through `WaitForEvent`. `_batch` buffers the reports of the
+    // `ExecuteEffects` call in flight; a failed batch's reports are discarded with it.
+    private readonly object _inboxLock = new();
+    private readonly Queue<DurableInboxEntry> _pendingRootEvents = new();
+    private List<DurableInboxEntry>? _batch;
+
+    // Restored timers that carry a host-stamped `ScheduledAt`: their remaining delay is computed
+    // when the re-arm reaches the host, not when `Restore` built it.
+    private readonly ConditionalWeakTable<DurableEffect, LogicalTimer> _restoredTimerDeadlines = new();
+
+    private int _startingTransitionIndex;
     private int _nextTransitionIndex;
     private int? _lastTransitionIndex;
     private int _executing;
+    private bool _restored;
 
     public DurableExecution(
         StateMachine<TContext> machine,
@@ -76,6 +92,7 @@ public sealed class DurableExecution<TContext> : IDurableExecution
         _host = host;
         _nextTransitionIndex = options.TransitionIndex;
         _startingTransitionIndex = options.TransitionIndex;
+        _configuredTransitionIndex = options.TransitionIndex;
         _lastTransitionIndex = options.TransitionIndex == 0 ? null : options.TransitionIndex - 1;
 
         RootAddress = options.RootAddress ?? ActorAddress.Root(machine.Id);
@@ -108,9 +125,14 @@ public sealed class DurableExecution<TContext> : IDurableExecution
     /// <summary>Index the next transition will be tagged with. Persist it with checkpoints.</summary>
     public int NextTransitionIndex => _nextTransitionIndex;
 
-    /// <summary>The initial transition, tagged.</summary>
+    /// <summary>The initial transition, tagged. Throws on a restored execution.</summary>
     public (State<TContext> State, IReadOnlyList<DurableEffect> Effects) InitialTransition(object? input = null)
     {
+        if (_restored)
+        {
+            throw new InvalidOperationException("InitialTransition cannot initialize a restored execution.");
+        }
+
         var (state, effects) = _machine.GetInitialState(input);
         return (state, Tag(effects));
     }
@@ -129,11 +151,262 @@ public sealed class DurableExecution<TContext> : IDurableExecution
     /// effects (an invoked child completing, a child reporting up). Reported events are handed out
     /// by <see cref="WaitForEvent"/>, in order, before it parks on the host — so the drive loop
     /// stays <c>Transition(state, await WaitForEvent())</c>.
+    /// <para>
+    /// A report made during <see cref="ExecuteEffects"/> belongs to that batch: it becomes
+    /// pending only when the batch completes, and is discarded if the batch throws or is cancelled,
+    /// because the retrying host re-executes the batch and reports it again. A report made outside
+    /// any batch is pending immediately. Pending reports are what <see cref="Checkpoint"/> stores.
+    /// </para>
     /// </summary>
-    public void ReportRootEvent(MachineEvent evt)
+    /// <param name="evt">The root-addressed event.</param>
+    /// <param name="source">The sender's durable identity, stored with the event in a checkpoint.</param>
+    public void ReportRootEvent(MachineEvent evt, SerializedActorRef? source = null)
     {
         ArgumentNullException.ThrowIfNull(evt);
-        _rootEvents.Enqueue(evt);
+        var entry = new DurableInboxEntry(evt, source);
+
+        lock (_inboxLock)
+        {
+            if (_batch is { } batch)
+            {
+                batch.Add(entry);
+            }
+            else
+            {
+                _pendingRootEvents.Enqueue(entry);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A checkpoint of <paramref name="state"/>: its persisted form, <see cref="NextTransitionIndex"/>
+    /// and the inbox of root events captured by settled batches but not yet taken by
+    /// <see cref="WaitForEvent"/> (v6 <c>checkpoint()</c>). Call it after
+    /// <see cref="ExecuteEffects"/> resolves.
+    /// <para>
+    /// Child snapshot updates (<see cref="SnapshotEvent"/>) are not stored: a restored child
+    /// re-reports its snapshot. Done, error and timeout events for a child that is no longer in
+    /// <paramref name="state"/>, or whose incarnation no longer matches the event's
+    /// <c>SessionId</c> because a later transition replaced it, are dropped.
+    /// </para>
+    /// </summary>
+    /// <param name="state">The snapshot the last settled batch left the execution in.</param>
+    /// <param name="options">
+    /// Passed to <see cref="StateMachine{TContext}.Persist"/>. <see cref="PersistOptions.RootAddress"/>
+    /// defaults to <see cref="RootAddress"/>.
+    /// </param>
+    public DurableCheckpoint Checkpoint(State<TContext> state, PersistOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+
+        options = options is null
+            ? new PersistOptions { RootAddress = RootAddress }
+            : options with { RootAddress = options.RootAddress ?? RootAddress };
+        var snapshot = _machine.Persist(state, options);
+
+        DurableInboxEntry[] pending;
+        lock (_inboxLock)
+        {
+            pending = [.. _pendingRootEvents];
+        }
+
+        var inbox = new List<DurableInboxEntry>(pending.Length);
+        foreach (var entry in pending)
+        {
+            if (entry.Event is SnapshotEvent)
+            {
+                continue;
+            }
+
+            if (LifecycleTarget(entry.Event) is var (actorId, sessionId))
+            {
+                var child = FindChild(state, actorId);
+                if (child is null || (sessionId is not null && child.Incarnation != sessionId))
+                {
+                    continue;
+                }
+            }
+
+            inbox.Add(entry);
+        }
+
+        return new DurableCheckpoint(snapshot, _nextTransitionIndex, inbox);
+    }
+
+    /// <summary>
+    /// Restores <paramref name="checkpoint"/> on a fresh execution (v6 <c>restore()</c>). The
+    /// execution continues from <see cref="DurableCheckpoint.NextTransitionIndex"/>, and
+    /// <see cref="WaitForEvent"/> hands out the checkpoint's inbox, in order, before it parks on
+    /// the host.
+    /// <para>
+    /// A <see cref="DurableExecutionOptions.TransitionIndex"/> other than 0 must equal the
+    /// checkpoint's index. v6 distinguishes an unset <c>transitionIndex</c> from 0; this port's
+    /// index is a plain <c>int</c>, so 0 counts as unset.
+    /// </para>
+    /// <para>
+    /// The returned effects re-arm the snapshot's pending timers (see <see cref="RearmTimers"/> for
+    /// how the remaining delay is derived). Restoration does not advance the transition index, run
+    /// entry actions or send the machine an event. Children are returned for the host to
+    /// re-create or re-attach; the pure core does not start them.
+    /// </para>
+    /// </summary>
+    /// <param name="checkpoint">A <see cref="Checkpoint"/> result, typically deserialized.</param>
+    /// <param name="options">
+    /// Passed to <see cref="StateMachine{TContext}.Restore"/>.
+    /// <see cref="RestoreOptions{TContext}.RootAddress"/> defaults to <see cref="RootAddress"/>.
+    /// </param>
+    public DurableRestoreResult<TContext> Restore(DurableCheckpoint checkpoint, RestoreOptions<TContext>? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        return Restore(checkpoint.Snapshot, checkpoint, options);
+    }
+
+    /// <summary>
+    /// Restores a bare persisted snapshot on a fresh execution. The execution keeps the
+    /// <see cref="DurableExecutionOptions.TransitionIndex"/> it was created with, so pass the
+    /// persisted index there. There is no inbox to preload.
+    /// </summary>
+    /// <param name="snapshot">The persisted snapshot.</param>
+    /// <param name="options">
+    /// Passed to <see cref="StateMachine{TContext}.Restore"/>.
+    /// <see cref="RestoreOptions{TContext}.RootAddress"/> defaults to <see cref="RootAddress"/>.
+    /// </param>
+    public DurableRestoreResult<TContext> Restore(PersistedSnapshot snapshot, RestoreOptions<TContext>? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        return Restore(snapshot, null, options);
+    }
+
+    private DurableRestoreResult<TContext> Restore(
+        PersistedSnapshot snapshot,
+        DurableCheckpoint? checkpoint,
+        RestoreOptions<TContext>? options)
+    {
+        if (_restored || _nextTransitionIndex != _startingTransitionIndex || Volatile.Read(ref _executing) != 0)
+        {
+            throw new InvalidOperationException("Restore requires a fresh durable execution.");
+        }
+
+        if (checkpoint is not null)
+        {
+            if (checkpoint.Inbox is null || !checkpoint.Inbox.All(IsValidInboxEntry))
+            {
+                throw new InvalidSnapshotException("The checkpoint inbox is invalid.");
+            }
+
+            if (_configuredTransitionIndex != 0 && _configuredTransitionIndex != checkpoint.NextTransitionIndex)
+            {
+                throw new InvalidOperationException(
+                    $"The execution's TransitionIndex ({_configuredTransitionIndex.ToString(CultureInfo.InvariantCulture)}) " +
+                    "does not match the checkpoint's NextTransitionIndex " +
+                    $"({checkpoint.NextTransitionIndex.ToString(CultureInfo.InvariantCulture)}).");
+            }
+
+            if (checkpoint.NextTransitionIndex < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(checkpoint),
+                    checkpoint.NextTransitionIndex,
+                    "NextTransitionIndex must be a non-negative integer.");
+            }
+        }
+
+        options = options is null
+            ? new RestoreOptions<TContext> { RootAddress = RootAddress }
+            : options with { RootAddress = options.RootAddress ?? RootAddress };
+        var restored = _machine.Restore(snapshot, options);
+        var state = restored.State;
+
+        if (checkpoint is not null)
+        {
+            _nextTransitionIndex = checkpoint.NextTransitionIndex;
+            _startingTransitionIndex = checkpoint.NextTransitionIndex;
+            _lastTransitionIndex = _nextTransitionIndex == 0 ? null : _nextTransitionIndex - 1;
+
+            lock (_inboxLock)
+            {
+                foreach (var entry in checkpoint.Inbox)
+                {
+                    var evt = entry.Event;
+                    if (LifecycleTarget(evt) is var (actorId, sessionId))
+                    {
+                        var child = FindChild(state, actorId);
+                        if (child is null)
+                        {
+                            continue;
+                        }
+
+                        // v6 re-stamps a stored lifecycle event with the restored child's session.
+                        if (sessionId is not null)
+                        {
+                            evt = WithSessionId(evt, child.Incarnation);
+                        }
+                    }
+
+                    _pendingRootEvents.Enqueue(entry with { Event = evt });
+                }
+            }
+        }
+
+        var effects = new List<DurableEffect>();
+        if (state.Status is SnapshotStatus.Active)
+        {
+            for (var i = 0; i < restored.Timers.Count; i++)
+            {
+                var timer = restored.Timers[i];
+                var tagged = RearmEffect(timer, _nextTransitionIndex, i);
+                if (timer.ScheduledAt is not null)
+                {
+                    _restoredTimerDeadlines.Add(tagged, timer);
+                }
+
+                effects.Add(tagged);
+            }
+        }
+
+        // v6 tags restoration effects at the checkpoint's index without advancing it, and a
+        // restored execution at index 0 can wait (as `event:restore:0`).
+        _lastTransitionIndex ??= _nextTransitionIndex;
+        _restored = true;
+
+        return new DurableRestoreResult<TContext>(state, effects, restored.Children);
+    }
+
+    private static bool IsValidInboxEntry(DurableInboxEntry? entry) =>
+        entry is { Event: not null } &&
+        (entry.Source is null || !string.IsNullOrEmpty(entry.Source.Actor));
+
+    /// <summary>
+    /// For a stored lifecycle event (done, error, timeout) the child id it addresses and the
+    /// session it names; null for any other event.
+    /// </summary>
+    private static (string ActorId, string? SessionId)? LifecycleTarget(MachineEvent evt) => evt switch
+    {
+        DoneActorEvent done => (done.ActorId, done.SessionId),
+        ErrorActorEvent error => (error.ActorId, error.SessionId),
+        ActorTimeoutEvent timeout => (timeout.ActorId, timeout.SessionId),
+        _ => null
+    };
+
+    private static MachineEvent WithSessionId(MachineEvent evt, string sessionId) => evt switch
+    {
+        DoneActorEvent done => done with { SessionId = sessionId },
+        ErrorActorEvent error => error with { SessionId = sessionId },
+        ActorTimeoutEvent timeout => timeout with { SessionId = sessionId },
+        _ => evt
+    };
+
+    private static ChildRecord? FindChild(State<TContext> state, string actorId)
+    {
+        foreach (var child in state.Children)
+        {
+            if (child.Id == actorId)
+            {
+                return child;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -156,6 +429,12 @@ public sealed class DurableExecution<TContext> : IDurableExecution
                 "ExecuteEffects calls must not overlap: await the previous call before starting the next batch.");
         }
 
+        var batch = new List<DurableInboxEntry>();
+        lock (_inboxLock)
+        {
+            _batch = batch;
+        }
+
         try
         {
             foreach (var tagged in effects)
@@ -163,14 +442,35 @@ public sealed class DurableExecution<TContext> : IDurableExecution
                 cancellationToken.ThrowIfCancellationRequested();
                 await Dispatch(tagged).ConfigureAwait(false);
             }
+
+            // Only a settled batch feeds the pending queue; a failed one is retried from the top
+            // and reports its root events again.
+            lock (_inboxLock)
+            {
+                _batch = null;
+                foreach (var entry in batch)
+                {
+                    _pendingRootEvents.Enqueue(entry);
+                }
+            }
         }
         finally
         {
+            lock (_inboxLock)
+            {
+                _batch = null;
+            }
+
             Volatile.Write(ref _executing, 0);
         }
     }
 
-    private ValueTask Dispatch(DurableEffect tagged) => tagged.Effect switch
+    private ValueTask Dispatch(DurableEffect tagged) =>
+        _restoredTimerDeadlines.TryGetValue(tagged, out var timer)
+            ? _host.ScheduleTimer(tagged, timer.Key, RemainingDelay(timer, null))
+            : DispatchEffect(tagged);
+
+    private ValueTask DispatchEffect(DurableEffect tagged) => tagged.Effect switch
     {
         SpawnEffect spawn => _host.SpawnActor(tagged, spawn),
         StartEffect start => _host.StartActor(tagged, start),
@@ -207,9 +507,13 @@ public sealed class DurableExecution<TContext> : IDurableExecution
     /// <see cref="LogicalTimer.ScheduledAt"/> (Unix ms) into the persisted snapshot. A host that
     /// knows the deadline passes <paramref name="remainingDelay"/> to re-arm with what is left
     /// (clamped at zero); without it a timer carrying <c>ScheduledAt</c> re-arms with
-    /// <c>ScheduledAt + Delay - now</c>, the way v6's <c>Actor.start()</c> uses a persisted
-    /// <c>scheduledAt</c>, and any other timer restarts from its full delay — so a worker that
-    /// crashes repeatedly can postpone it indefinitely.
+    /// <c>ScheduledAt + Delay - now</c>, clamped between zero and the declared delay, the way v6's
+    /// <c>Actor.start()</c> uses a persisted <c>scheduledAt</c>, and any other timer restarts from
+    /// its full delay — so a worker that crashes repeatedly can postpone it indefinitely.
+    /// </para>
+    /// <para>
+    /// <see cref="Restore(DurableCheckpoint, RestoreOptions{TContext}?)"/> returns the same re-arms
+    /// as effects instead; use one or the other, not both.
     /// </para>
     /// </summary>
     public async Task RearmTimers(
@@ -223,51 +527,72 @@ public sealed class DurableExecution<TContext> : IDurableExecution
         {
             cancellationToken.ThrowIfCancellationRequested();
             var timer = timers[i];
-            Effect effect = timer.Kind is TimerKind.Raise
-                ? new RaiseEffect(timer.Event, timer.Id, timer.Delay) { Seq = timer.Seq }
-                : new SendToEffect(timer.Target ?? EffectTarget.Self, timer.Event, timer.Id, timer.Delay)
-                {
-                    Seq = timer.Seq
-                };
-            var tagged = new DurableEffect(
-                $"restore:{_startingTransitionIndex.ToString(CultureInfo.InvariantCulture)}:{i.ToString(CultureInfo.InvariantCulture)}",
-                _startingTransitionIndex,
-                i,
-                RootAddress,
-                effect,
-                EffectDescriptor.Of(effect, RootAddress));
-            var delay = remainingDelay is not null ? remainingDelay(timer)
-                : timer.ScheduledAt is { } scheduledAt
-                    ? TimeSpan.FromMilliseconds(scheduledAt) + timer.Delay -
-                      TimeSpan.FromMilliseconds(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
-                    : timer.Delay;
-            if (delay < TimeSpan.Zero)
-            {
-                delay = TimeSpan.Zero;
-            }
-
-            await _host.ScheduleTimer(tagged, timer.Key, delay).ConfigureAwait(false);
+            var tagged = RearmEffect(timer, _startingTransitionIndex, i);
+            await _host.ScheduleTimer(tagged, timer.Key, RemainingDelay(timer, remainingDelay)).ConfigureAwait(false);
         }
     }
 
+    /// <summary>One restored timer as a re-arm effect, tagged <c>"restore:{transitionIndex}:{i}"</c>.</summary>
+    private DurableEffect RearmEffect(LogicalTimer timer, int transitionIndex, int i)
+    {
+        Effect effect = timer.Kind is TimerKind.Raise
+            ? new RaiseEffect(timer.Event, timer.Id, timer.Delay) { Seq = timer.Seq, Occurrence = timer.Occurrence }
+            : new SendToEffect(timer.Target ?? EffectTarget.Self, timer.Event, timer.Id, timer.Delay)
+            {
+                Seq = timer.Seq,
+                Occurrence = timer.Occurrence
+            };
+        return new DurableEffect(
+            $"restore:{transitionIndex.ToString(CultureInfo.InvariantCulture)}:{i.ToString(CultureInfo.InvariantCulture)}",
+            transitionIndex,
+            i,
+            RootAddress,
+            effect,
+            EffectDescriptor.Of(effect, RootAddress));
+    }
+
+    private static TimeSpan RemainingDelay(LogicalTimer timer, Func<LogicalTimer, TimeSpan>? remainingDelay)
+    {
+        if (remainingDelay is not null)
+        {
+            var remaining = remainingDelay(timer);
+            return remaining < TimeSpan.Zero ? TimeSpan.Zero : remaining;
+        }
+
+        if (timer.ScheduledAt is not { } scheduledAt)
+        {
+            return timer.Delay;
+        }
+
+        var left = TimeSpan.FromMilliseconds(scheduledAt) + timer.Delay -
+            TimeSpan.FromMilliseconds(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        return left < TimeSpan.Zero ? TimeSpan.Zero : left > timer.Delay ? timer.Delay : left;
+    }
+
     /// <summary>
-    /// The next event for the root actor: one a previous batch reported, or — once none are
-    /// queued — whatever the host's durable wait produces.
+    /// The next event for the root actor: one a previous batch reported (or a restored checkpoint's
+    /// inbox held), or — once none are queued — whatever the host's durable wait produces. After a
+    /// restore at index 0 the wait id is <c>"event:restore:0"</c>.
     /// </summary>
     public async Task<MachineEvent> WaitForEvent(CancellationToken cancellationToken = default)
     {
         if (_lastTransitionIndex is not { } index)
         {
-            throw new InvalidOperationException("Cannot wait for an event before the first transition.");
+            throw new InvalidOperationException("Cannot wait for an event before the first transition or restore.");
         }
 
-        if (_rootEvents.Count > 0)
+        lock (_inboxLock)
         {
-            return _rootEvents.Dequeue();
+            if (_pendingRootEvents.TryDequeue(out var queued))
+            {
+                return queued.Event;
+            }
         }
 
         var wait = new DurableWait(
-            $"event:{index.ToString(CultureInfo.InvariantCulture)}",
+            _restored && _nextTransitionIndex == 0
+                ? "event:restore:0"
+                : $"event:{index.ToString(CultureInfo.InvariantCulture)}",
             index);
 
         return await _host.WaitForEvent(wait, cancellationToken).ConfigureAwait(false);
@@ -278,7 +603,8 @@ public sealed class DurableExecution<TContext> : IDurableExecution
     /// <c>Transition(state, await WaitForEvent())</c> until the machine settles.
     /// <para>
     /// Fresh executions only. A resumed one (a nonzero
-    /// <see cref="DurableExecutionOptions.TransitionIndex"/>, or one that has already transitioned)
+    /// <see cref="DurableExecutionOptions.TransitionIndex"/>, a restored one, or one that has
+    /// already transitioned)
     /// throws <see cref="DurableExecutionResumeException"/>: <c>Run</c> starts from the machine's
     /// initial state, which is not where a checkpoint left off.
     /// </para>
@@ -287,7 +613,7 @@ public sealed class DurableExecution<TContext> : IDurableExecution
     /// <exception cref="DurableExecutionCancelledException">The machine was stopped.</exception>
     public async Task<object?> Run(object? input = null, CancellationToken cancellationToken = default)
     {
-        if (_startingTransitionIndex != 0 || _nextTransitionIndex != _startingTransitionIndex)
+        if (_restored || _startingTransitionIndex != 0 || _nextTransitionIndex != _startingTransitionIndex)
         {
             throw new DurableExecutionResumeException();
         }

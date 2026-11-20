@@ -46,12 +46,14 @@ public sealed class JournalingHost : IDurableHost
 
         _timers[(effect.Source, key.Serialize())] = cts;
 
+        // Echo the scheduling's occurrence so a late firing cannot fire a same-key replacement.
+        var occurrence = effect.Descriptor.Occurrence;
         _ = Task.Delay(delay, cts.Token).ContinueWith(
             task =>
             {
                 if (task.IsCompletedSuccessfully)
                 {
-                    MailboxOf(effect.Source).Writer.TryWrite(new TimerEvent(key));
+                    MailboxOf(effect.Source).Writer.TryWrite(new TimerEvent(key, occurrence));
                 }
             },
             TaskScheduler.Default);
@@ -138,13 +140,23 @@ A `TimerKey` is the timer's explicit id (`TimerKey.ById`), else — for an id-le
 raise/send — the actor's timer sequence number (`TimerKey.BySeq`), else — for built-in `after` and
 `timeout` timers — its event (`TimerKey.ByEvent`). No ids are generated.
 
-`ScheduleTimer(effect, key, delay)` is the whole scheduling contract; `effect.Source` is the owning
-actor's address. When the delay elapses, the host sends the owning actor `new TimerEvent(key)` —
-that is all it says. The machine looks the key up on its own ledger and decides what firing means:
+Every delayed raise/send, built-in `after` and `timeout` timers included, also carries an
+`Occurrence`: the identity of that scheduling, from the snapshot's `NextTimerOccurrence` counter.
+It is not part of the `TimerKey`. A replacement scheduled under the same key gets a new occurrence.
 
-- A live key releases the timer's event and removes the entry.
+`ScheduleTimer(effect, key, delay)` is the whole scheduling contract; `effect.Source` is the owning
+actor's address, and `effect.Descriptor.Occurrence` is the scheduling's occurrence. When the delay
+elapses, the host sends the owning actor `new TimerEvent(key, occurrence)`, echoing that
+occurrence. The machine looks the key up on its own ledger and decides what firing means:
+
+- A live key whose timer has the same occurrence releases the timer's event and removes the entry.
 - A key no longer on the ledger is a stale firing. It produces no effects and no state change.
   Cancellation always races firing, so this case is normal, not exceptional.
+- A live key whose timer has a different occurrence is also a stale firing: it belongs to a
+  scheduling that was cancelled or replaced, and the replacement keeps waiting for its own
+  deadline.
+- A `TimerEvent` without an occurrence matches by key alone. Timers restored from snapshots
+  written before occurrences existed have none, and fire this way.
 
 A delayed send is a timer on the **sender**, not the target: the sender owns the ledger entry and
 is the only actor that can cancel it. When the timer fires, the delayed send becomes an immediate
@@ -153,7 +165,9 @@ is the only actor that can cancel it. When the timer fires, the delayed send bec
 `ScheduleTimer` and `CancelTimer` receive the originating `DurableEffect` (the delayed
 `RaiseEffect`/`SendToEffect`, or the `CancelEffect`) so a journal can key them by effect id like
 every other operation. Key the host-side alarm itself by `(effect.Source, key.Serialize())`, which
-is stable across replays. Rescheduling a pending key replaces that timer in place and emits no
+is stable across replays, and leave the occurrence out of that key so a replacement and a cancel
+find the alarm. A host that journals firings deduplicates them by `(key, occurrence)` instead: two
+firings of one key with different occurrences are different firings. Rescheduling a pending key replaces that timer in place and emits no
 `CancelEffect`, so `ScheduleTimer` must replace an alarm already armed under the same key.
 `CancelTimer` receives the `CancelEffect`; cancel the alarm under `cancel.Key`.
 
@@ -161,7 +175,9 @@ The core never records a deadline. Persist it yourself when you accept `Schedule
 your own store, or as `PersistedTimer.ScheduledAt` (Unix ms start), which restore carries through
 to `LogicalTimer.ScheduledAt` — and hand it back on restore:
 `RearmTimers(restored.Timers, remainingDelay: t => dueAt[t.Key.Serialize()] - now)` re-arms each
-timer with what is left (clamped at zero). Without a `remainingDelay`, a timer carrying
+timer with what is left (clamped at zero). `DurableExecution<TContext>.Restore` returns the same
+re-arms as effects, using `ScheduledAt` when present; use one or the other. Each re-armed effect carries the restored timer's
+occurrence, so the host echoes it as for any other scheduling. Without a `remainingDelay`, a timer carrying
 `ScheduledAt` re-arms with `ScheduledAt + Delay - now`; any other timer restarts from its full
 declared delay on every restore, so a worker that crashes repeatedly would postpone it
 indefinitely.
@@ -218,6 +234,18 @@ if (snapshot.Status is SnapshotStatus.Done)
 That keeps the drive loop uniform: `Transition(state, await WaitForEvent())`, whether the next
 event came from a child that just finished or from a wait that outlived the process.
 
+A report made during `ExecuteEffects` belongs to that batch. It becomes pending when the batch
+completes, and is discarded if the batch throws or is cancelled, because the retrying host
+re-executes the batch and reports the event again. A report made outside any batch is pending
+immediately. `ReportRootEvent` also takes the sender's identity, `new SerializedActorRef(address)`,
+which a checkpoint stores with the event.
+
+A live host that owns a single FIFO mailbox (v6 `captureRootEvents: false`) does not call
+`ReportRootEvent`. It puts root events in the same mailbox as external events, so a later child
+event cannot overtake an earlier queued one, and its `WaitForEvent` reads from that mailbox. The
+host then owns their ordering and the events of failed batches, and checkpoints carry an empty
+inbox.
+
 ### Journaling rules
 
 - **Key by effect id, and skip what you have already done.** That is what makes a replay
@@ -256,29 +284,78 @@ stable across replays and make good seeds.
 
 ## Checkpoints
 
-Checkpoint *after* `ExecuteEffects` resolves: "effects executed" is what makes a snapshot safe to
-resume from. Persist `NextTransitionIndex` alongside the snapshot, and pass it back as
-`DurableExecutionOptions.TransitionIndex` when the next worker recreates the execution, so effect
-ids continue where the journal left off instead of colliding with it.
+Checkpoint with `execution.Checkpoint(state)` after `ExecuteEffects` resolves: "effects executed"
+is what makes a snapshot safe to resume from. Persist the whole `DurableCheckpoint` atomically. It
+holds three things:
+
+- `Snapshot`: the persisted snapshot. `Checkpoint(state, options)` passes `options` to
+  `StateMachine<TContext>.Persist`.
+- `NextTransitionIndex`: the index the next transition gets.
+- `Inbox`: root-addressed events that settled batches reported and `WaitForEvent` has not handed
+  out yet, such as a child's `DoneActorEvent`. Each entry's `Source` is the sender's identity, when
+  the host reported one.
 
 ```csharp
-var snapshot = machine.Persist(state, new PersistOptions { EmbedChildren = false });
-File.WriteAllText(
-    path,
-    JsonSerializer.Serialize(new Checkpoint(execution.NextTransitionIndex, snapshot), Json));
+var checkpoint = execution.Checkpoint(state, new PersistOptions { EmbedChildren = false });
+
+File.WriteAllText(path, JsonSerializer.Serialize(checkpoint, Json));
 ```
+
+Under `SnapshotJson.DefaultOptions()` a checkpoint is written as
+`{ "snapshot": …, "nextTransitionIndex": n, "inbox": [{ "event": …, "source": { "@actor": … } }] }`.
+Inbox events carry the same `@event` discriminator as events inside a persisted snapshot, and
+`source` is omitted when the host reported none.
+
+Without the inbox, an event reported in the last batch exists only in memory. A child that
+completed during that batch is not restarted on restore, so its completion would never arrive.
+
+Inbox event payloads are stored as they are and must be serializable data, like timer events in a
+persisted snapshot. Child snapshot updates (`SnapshotEvent`) are not stored: a restored
+`SyncSnapshot` child must report its current snapshot again when the host re-attaches it.
+Completion, error and timeout events for a child that is no longer in the snapshot, or whose
+incarnation no longer matches the event's `SessionId` because a later transition replaced it, are
+dropped.
+
+Restore the checkpoint on a fresh execution before entering the loop:
+
+```csharp
+var resumedHost = new JournalingHost();
+var resumed = new DurableExecution<OrderContext>(machine, resumedHost);
+
+// Effect ids continue from the checkpoint's `NextTransitionIndex`, and `WaitForEvent`
+// hands out its inbox before parking on the host.
+var (restored, restoreEffects, children) = resumed.Restore(
+    checkpoint,
+    new RestoreOptions<OrderContext> { ContextConverter = ReadContext });
+```
+
+The resumed execution continues from the checkpoint's `NextTransitionIndex`, and `WaitForEvent`
+hands out the inbox, in order, before the host's wait. A nonzero
+`DurableExecutionOptions.TransitionIndex` must equal the checkpoint's `NextTransitionIndex`, or
+`Restore` throws. v6 treats an unset `transitionIndex` as "take the checkpoint's"; this port's
+index is an `int`, so 0 has that meaning. An invalid inbox throws `InvalidSnapshotException`.
+`Restore` also accepts a bare `PersistedSnapshot`; pass the persisted index as `TransitionIndex`
+in that case.
+
+`Restore` returns the state, the effects that re-arm its pending timers, and the children the host
+must re-create or re-attach (the pure core does not start them). Execute the effects with
+`ExecuteEffects` before waiting or processing the next event. Restoration does not advance
+`NextTransitionIndex`, run entry actions or send the machine an event. Its effect ids use a
+separate `restore:{nextTransitionIndex}:{effectIndex}` namespace, and a restore at index 0 waits
+under `event:restore:0`. Create a fresh execution for each restore: `Restore` on an execution that
+has already transitioned or restored throws, and so does `InitialTransition` after a restore.
 
 Persist `MachineId` and `MachineVersion` too, and reject a worker whose machine disagrees: a
 changed machine reorders effect ids, and memoized results silently misalign. `Restore` enforces
 this for you — see [Persistence](persistence.md).
 
 `Run` is convenience over the explicit loop and only starts *fresh* executions; a nonzero
-`TransitionIndex`, or an execution that has already transitioned, throws
+`TransitionIndex`, a restored execution, or one that has already transitioned, throws
 `DurableExecutionResumeException`. A resuming worker writes the loop out:
 
 ```csharp
 await execution.ExecuteEffects(effects);
-Save(machine, execution, state, path);
+Save(execution, state, path);
 
 while (state.Status is SnapshotStatus.Active)
 {
@@ -286,7 +363,7 @@ while (state.Status is SnapshotStatus.Active)
 
     (state, effects) = execution.Transition(state, evt);
     await execution.ExecuteEffects(effects);
-    Save(machine, execution, state, path);
+    Save(execution, state, path);
 }
 ```
 
