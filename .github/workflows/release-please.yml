@@ -31,13 +31,20 @@ jobs:
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
 
-  # A tag created with GITHUB_TOKEN does not fire `on: push: tags`, so call the release
-  # workflow directly instead of relying on the tag trigger.
+  # A tag created with GITHUB_TOKEN does not fire `on: push: tags`, so dispatch the release
+  # workflow directly. It runs as its own top-level workflow (not workflow_call) so that
+  # release.yml can request id-token: write and the NuGet OIDC token names release.yml.
   publish:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
-    uses: ./.github/workflows/release.yml
-    with:
-      tag: ${{ needs.release-please.outputs.tag_name }}
-      sha: ${{ needs.release-please.outputs.sha }}
-    secrets: inherit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch release.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main \
+            -f tag="${{ needs.release-please.outputs.tag_name }}" \
+            -f sha="${{ needs.release-please.outputs.sha }}"

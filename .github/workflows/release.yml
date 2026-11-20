@@ -4,12 +4,12 @@ permissions:
   contents: write # publish the draft GitHub release after NuGet push
   id-token: write # NuGet Trusted Publishing (OIDC)
 
-# Normally invoked by release-please.yml after a release PR is merged. Pushing a
+# Normally dispatched by release-please.yml after a release PR is merged. Pushing a
 # `v<Version>` tag by hand (Version lives in Directory.Build.props) also works.
 on:
   push:
     tags: ['v*']
-  workflow_call:
+  workflow_dispatch:
     inputs:
       tag:
         description: Release tag, e.g. v0.1.0-alpha
