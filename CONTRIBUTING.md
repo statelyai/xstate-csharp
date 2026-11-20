@@ -42,8 +42,8 @@ Releases are automated. Do not edit `<Version>` in `Directory.Build.props` or
 
 ### Versioning
 
-Pre-1.0: `feat:` bumps minor, `fix:` bumps patch. Versions are alpha prereleases
-(`0.1.0-alpha`, ...). To go stable, remove `prerelease`, `prerelease-type`, and
+Pre-1.0: `feat:` bumps minor, `fix:` bumps patch. Versions are beta prereleases
+(`0.1.0-beta.1`, ...). To go stable, remove `prerelease`, `prerelease-type`, and
 `versioning` from `release-please-config.json`.
 
 ### Publishing credentials
